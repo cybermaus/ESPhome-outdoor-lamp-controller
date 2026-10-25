@@ -8,9 +8,9 @@ A small ESPHome controller for outdoor lamps: one relay, one wall input, and a d
 
 **It switches outdoor lamps on a sun based schedule.** Simple enough. 
 
-**It works with or without stable network.** It only needs to sync time once, for example when the lamp is placed far from the WiFi. Each lamp calculates its own cycle. For the rest there is no reliance on connectivity, internet service, or any central controller like Home Assistant. If the WiFi, Home Assistant or the router goes away, the lamps keep switching right up to the next power cycle. 
+It works with or **without stable network.** It only needs to sync time once, for example when the lamp is placed far from the WiFi. Each lamp calculates its own cycle. For the rest there is no reliance on connectivity, internet service, or any central controller like Home Assistant. If WiFi, Home Assistant or the router goes away, the lamps keep switching right up to the next power cycle when they loose the clock. 
 
-**Yet despite not relying on centralized control, multiple devices still work as one.** Lamps that share a group name configure and switch together, and show up in Home Assistant. Change a setting on one lamp and the whole group is updated. Whichever lamp reaches a switching moment first moves the group, and the others follow virtually instantly, so they also visually appear as a single wired lamp. A rebooting or reconnecting lamp asks the group what is going on in case it missed any configuration updates. 
+Yet despite not relying on centralized control, **multiple devices still work as one.** Lamps that share a group name configure and switch together, and show up in Home Assistant. Change a setting on one lamp and the whole group is updated. Whichever lamp reaches a switching moment first drives the group, and the others follow virtually instantly so they visually appear as a single wired lamp chain. A lamp rebooting or reconnecting asks the group what is going on in case it missed any configuration updates. 
 
 ### Main controlling modes
 
@@ -27,17 +27,17 @@ They combine in the way you would expect:
 - **Sun only**: on from sundown to sunup, the whole night.
 - **Schedule only**: on from the on time to the off time.
 - **Sun + schedule**: on from sundown until the off time (say 23:00), off during the night, and on again from the on time (say 05:30) until sunup. A short, efficient lamp cycle that still lights the dark hours you care about.
-- **Sensor on top of any of these**: a dark, overcast sky can turn the lamp on early or keep it on later. The sensor widens the dark, but never switches the lamp on during the night pause of sun + schedule.
-- **Sensor only**: the lamp simply follows the sensor, and shares that with the group.
-- **None**: the lamp only follows the wall switch, Home Assistant and the group.
+- **Sensor on top of any of these**: a dark, overcast sky can turn the lamp on early or keep it on later.
+- **Sensor only**: the lamp simply follows the sensor, and shares that with the group, only one need a sensor, and they all switch as one.
+- **None**: the lamp only follows the wall switch (or Home Assistant) and drives the group to all switch as one.
 
-**Choose how dark is dark.** The Twilight level select decides what counts as sun up and down: Normal (the official sunrise and sunset), Half Civil, or Civil (the lamp stays on longer).
+**Twilight level.** The Twilight level select decides what counts as sun up and down: Normal (the official sunrise and sunset), Half Civil, or Civil twilight(the lamp stays on longer).
 
-**Works far north.** Dusk and dawn near midsummer can fall around midnight, or the sun may not set at all. The lamp follows the actual position of the sun, so there are no special cases for you to configure.
+**Works far north.** Dusk and dawn near midsummer can fall around midnight, or the sun may not set at all. The lamp follows the actual position of the sun, I think all edge cases are accounted for. .
 
-**A real wall switch.** Without the sensor, the wall input acts as a hotel switch: every flip of the switch toggles the lamp, up or down, and the whole group follows. A manual switch stays until the cycle next changes its mind.
+**Optional wall switch.** Without the sensor, the input acts as wall switch in a hotel or hallway switch setup: every flip of toggles the lamp, and the whole group follows. Multiple locations can hold a switch. Any manually switched state stays until the next cycle update. 
 
-**Know what it will do.** Two text sensors show the next sun up and sun down, and the resulting lamp times.
+**Feedback info** Two text sensors show the next sun up and sun down, and the resulting lamp switch times.
 
 ### All settings
 
@@ -47,9 +47,11 @@ They combine in the way you would expect:
 
 1. Copy `outdoor-lamp.yaml` and add `wifi_ssid`, `wifi_password` and `ota_password` to your `secrets.yaml`.
 2. Check the pins in the `substitutions` block against your board.
-3. Flash it, and adopt it in Home Assistant.
-4. In Home Assistant, enable the configuration entities (they are disabled by default), set your location and timezone, and pick your cycle.
-5. For several lamps: flash them all and give them the same Device Group. They find each other.
+3. Compile and Flash it.
+4. Optionally, adopt it in Home Assistant, and set the Device label and rename HA Friendly name to the same.<br>
+   Even if you adopt in HA, it may be easiest to configure using the device Web UI
+6. Set your location, timezone, and choose your cycle drivers.
+7. For several lamps: give them the same Device Group. They find each other and update each other
 
 ## Detailed help
 
@@ -70,19 +72,20 @@ The lamp is off at boot until the cycle has a valid clock and decides it should 
 | Entity | What it does |
 |---|---|
 | Lamp | The relay |
+| Device Label | A short name for you, for example `Chalet14` or `Lamp03` |
+| Device Group | Lamps with the same group name act as one |
 | Use sun | Cycle follows the sun |
 | Use schedule | Cycle follows the schedule times |
-| Use daylight sensor | Wall input is a light sensor instead of a wall switch |
+| Use daylight sensor | Switch input is a light sensor instead of a wall switch |
 | Twilight level | Normal, Half Civil or Civil |
 | Schedule on / Schedule off | The pair of times of the schedule |
 | Location Latitude / Longitude | Used for the sun calculation, one decimal is enough |
 | Timezone | POSIX timezone text, see below |
-| Device Label | A short name for you, for example `Chalet14` or `Lamp03` |
-| Device Group | Lamps with the same group name act as one |
 | Twilight Info | The next sun up and sun down |
 | Lamp Schedule | The resulting on and off times |
 
-Most configuration entities are disabled by default in Home Assistant. Enable the ones you need.
+Most configuration entities are disabled by default in Home Assistant. Enable the ones you need, however it may be easiest to simply configrure from the Device Web UI
+All parameters are used and shared amoung the group, regardless if they are enabled in HA or not. 
 
 ### Setting up location and time
 
@@ -94,6 +97,7 @@ The timezone is a POSIX string, not a name. Examples:
 |---|---|
 | Central Europe (Amsterdam, Stockholm, Berlin) | `CET-1CEST,M3.5.0,M10.5.0/3` |
 | UTC | `UTC0` |
+TODO: if TZ is blanked out, populate it with timezone from HA
 
 The time comes from Home Assistant or from NTP. On every WiFi connect the lamp tries the DHCP gateway as NTP server first, and a public pool server second, so no addresses are hardcoded. Without a valid clock the cycle does nothing and the wall switch keeps working. The only exception is sensor-only mode, which does not need a clock.
 
@@ -129,8 +133,8 @@ Check the actual info text for actual times, as the "about 15 minutes" is in mod
 
 The wall input has two jobs, chosen by Use daylight sensor.
 
-- **Off (default): wall switch.** Every change of the input toggles the lamp, like a hotel switch. The first state after power-up is ignored, so the position of the switch at boot does not toggle the lamp.
-- **On: daylight sensor.** The input is a state. Closed to GND means dark. The sensor is only read by the lamp it is connected to, and that lamp shares the resulting lamp state with the group. Use daylight sensor itself is not shared, so only one lamp needs a sensor.
+- **Off (default): wall switch.** One or more switches can exist in multiple locations, every change of any switch toggles the lamp, like a hotel or hallway switch setup. The first state after power-up is ignored, so the position of the switch at boot does not toggle the lamp.
+- **On: daylight sensor.** The input is a state. The sensor is read by the lamp it is connected to, and that lamp shares the resulting lamp state with the group. Only one lamp needs a sensor.
 
 ### Groups
 
