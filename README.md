@@ -12,6 +12,8 @@ A small ESPHome controller for outdoor lamps: one relay, one wall input, and a d
 
 **Yet despite not relying on centralized control, multiple devices still work as one.** Lamps that share a group name configure and switch together, and show up in Home Assistant. Change a setting on one lamp and the whole group is updated. Whichever lamp reaches a switching moment first moves the group, and the others follow virtually instantly, so they also visually appear as a single wired lamp. A rebooting or reconnecting lamp asks the group what is going on in case it missed any configuration updates. 
 
+### Main controlling modes
+
 | Switch | The lamp is driven by |
 |---|---|
 | Use sun | Sun up and sun down, calculated locally |
