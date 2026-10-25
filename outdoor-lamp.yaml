@@ -76,8 +76,8 @@
 #
 # CLOCK: Without a valid clock the cycle does nothing but the wall switch keeps working.
 # Time is taken from HA (if availible) or NTP 
-# At every WiFi connect the DHCP gateway is made NTP server 1 and a NTP pool server
-# becomes server 2. So no network address is hardcoded.
+# When we have a valid clock, reboots are avoided, instead prolonged loss of connectivity 
+# will cycle the WiFi module. After 7 days of no connectivity, we give in and reboot
 #
 # Wall switch: toggles the lamp manually.
 # The cycle is edge based or state based, see SWITCH config explanation below.
@@ -208,9 +208,10 @@ esp8266:
 logger:
   level: INFO
 
-# This device works without HA, so no reboot needed on loss of HA
-# Note that missing WiFi will still cause an occasional reboot
 api:
+  # This device works without HA, and we avoid reboots so we do not loose time
+  # However prolonged lack of time sync will cycle the wifi module
+  # and 7 days no time sync will finally do a reboot
   reboot_timeout: 0s
 
 ota:
@@ -220,15 +221,16 @@ ota:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
-  # delay boot, as we update hostname with a configured friendlyname
-  # Works without connectivity, so rarely reboot.
-  # We only need to connect briefly to sync the time-of-day clock,
-  # and to reach the WebUI.
-  reboot_timeout: 24hours
-  # On every (re)connect: NTP from the DHCP gateway, ask the group for its config
+  # This device works without HA, and we avoid reboots so we do not loose time
+  # However prolonged lack of time sync will cycle the wifi module
+  # and 7 days no time sync will finally do a reboot
+  reboot_timeout: 0s
   on_connect:
-#    - script.execute: hostname_apply
+    # Uncompleted experiment to update the DHCP/DNS hostname
+#   - script.execute: hostname_apply
+    # This reads the gateway and assumes it is a NTP server
     - script.execute: net_setup
+    # On every (re)connect: ask the group for the latest config
     - script.execute: group_request
   ap:
     ssid: "${devicename} fallback hotspot"
@@ -243,6 +245,7 @@ web_server:
   version: 3
   local: true
 
+#######################################################################################
 
 # Group transport, see the header for the packets
 udp:
@@ -364,6 +367,7 @@ time:
   - platform: homeassistant
     id: ha_time
     on_time_sync:
+      - lambda: 'id(unsynced_h) = 0;'
       - script.execute: lamp_update
 
   - platform: sntp
@@ -375,8 +379,8 @@ time:
     servers:
       - 0.pool.ntp.org
     on_time_sync:
+      - lambda: 'id(unsynced_h) = 0;'
       - script.execute: lamp_update
-
 
 # Sun position and sunrise/sunset, calculated locally.
 # Latitude / longitude here are only the start values, lamp_update sets
@@ -387,6 +391,7 @@ sun:
   latitude: ${default_latitude}
   longitude: ${default_longitude}
 
+#######################################################################################
 
 globals:
   # What the lamp should be by the cycle: -1 unknown, 0 off, 1 on
@@ -429,6 +434,10 @@ globals:
   # we stagger the send of UDP to avoid issues with accasional buffer problems on UDP send
   - id: udp_queue
     type: std::vector<std::string>
+  # Hours since the last time sync (NTP or HA), counted by the hourly interval
+  - id: unsynced_h
+    type: int
+    initial_value: '0'
 
 output:
   - platform: gpio
@@ -1083,6 +1092,16 @@ script:
             - lambda: 'id(udp_queue).erase(id(udp_queue).begin());'
             - delay: 20ms
 
+  # When we get no time-sync for a prolonged time, we will cycle the WiFi
+  # we prefer that over a full reboot, as a reboot would loose the clock completely.
+  - id: wifi_cycle
+    mode: single
+    then:
+      - wifi.disable:
+      - delay: 10min
+      - wifi.enable:
+
+
 #  # Hostname from the label, applied after ESPHome's own apply at connect.
 #  - id: hostname_apply
 #    mode: restart
@@ -1120,6 +1139,27 @@ interval:
   - interval: 1min
     then:
       - script.execute: lamp_update
+
+  # Every hour: count hours without a time sync.
+  # Every 6 hours without time sync: cycle WiFi. After 7 days without: reboot.
+  - interval: 1h
+    then:
+      - lambda: 'id(unsynced_h)++;'
+      - if:
+          condition:
+            lambda: 'return id(unsynced_h) >= 168;'
+          then:
+            - lambda: 'App.safe_reboot();'
+      - if:
+          condition:
+            lambda: 'return id(unsynced_h) % 6 == 0;'
+          then:
+            - if:
+                condition:
+                  not:
+                    script.is_running: wifi_cycle
+                then:
+                  - script.execute: wifi_cycle
 
 
 button:
