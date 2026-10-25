@@ -1,0 +1,1188 @@
+# Outdoor lamp controller
+#
+# NARATIVE
+#
+# One device with a relay to switch a lamp, a wall switch input, and a daily cycle based on sunrise/sunset.
+# They are as independent from centralized control as possible, only need time but otherwise
+# can run and switch independantly and without connectivity.
+#
+# Yes, despite this independance, when they do have connectivity, they talk and 
+# configure as one, switch as one, report into HA. They behave as if they are centralized
+# but when all connections drop, they continue to work
+#
+#
+# Control wise, the device has 3 explicit and 1 implicit factors driving the daily cycle
+#   USE_SUN      : lamp driven by sun up and sun down
+#   USE_SCHEDULE : lamp driven by a single pair of on/off times
+#   USE_SENSOR   : lamp driven by an external light sensor
+#   and any connected wall switch will simply switch the lights as manual event
+# When combined, these interact
+#   SUN+SCHEDULE : On at sundown, off at schedule, on at schedule, off at sunup
+#                  For example, on from 05h30-sunup and on from sundown to 23h00
+#   SUN+SENSOR   : On at sun times, except when it suddenly gets dark extra early
+#                  due to overcast. We call this "widen the dark" in comment lines  
+#   SENSOR+SCHED : On at sensor dark, but we go off at and on at night
+#                  For example, on from 05h30-light and on from dark to 23h00
+#   Similar intuitive use cases exist for the other permutations.
+#   When the sensor is configured, the input can still be a wall switch but now
+#   it switches the lamp by switch state rather then switch event, like a normal switched lamp
+#
+# The scedule is a simple day schedule. No weekend vs weekday, no extra late on saturday.
+# only a single pair of on/off is provided. 
+#
+# Code was added for many edge cases:
+#   sun-up already before schedule-on; sun or schedule times past midnight;
+#   24 hour sun up in the far north; 
+#   These edge cases do make the code a little less readible, when you encounter
+#   a weird conditional construct, assume it is for a edge case. I hope a nearby
+#   comment line will explain which one.
+#
+# All devices configure and work as one by means of UDP broad and multicast.
+# Even though each device does its own calculations, it also turns on based on broadcast
+# so they all switch at the exact same moment even when their cycles run a few seconds out of step
+#  
+# DETAILS
+# 
+# Daily cycle, set by two switches, Use sun and Use times:
+#   Sun+Schedule   Morning  schedule_on -> sun_up      (lamp on before the sun is up)
+#                  Evening  sun_down -> schedule_off   (lamp on after the sun is down)
+#                  So between schedule_off and schedule_on the lamp has a pause.
+#   Sun only       sun_down -> sun_up                  (lamp on the entire night)
+#   Schedule only  schedule_on -> schedule_off         (no sun involved)
+#   Neither        the cycle does nothing: the lamp is only switched by the
+#                  wall switch or by HA or by any group member with a wall switch
+#
+# USE_SUN change: as a courtesy to the operator, changing this also swaps
+# the schedule_on and schedule_off times, as the obvious on-in-evening becomes 
+# on-in-early-morning. User will likely still choose different values though.
+#
+# Sun level select, what counts as sun up / down (with Use sun on):
+#   Normal      -0.833 degrees, the official sunrise / sunset
+#   Half Civil  -3 degrees
+#   Civil       -6 degrees (lamp on longer)
+#
+# Location and timezone are runtime settings (latitude, longitude, timezone
+# text). The timezone is a POSIX string, not a name, for example
+#   Europe/Amsterdam = CET-1CEST,M3.5.0,M10.5.0/3
+#   UTC              = UTC0
+# The sun times are calculated locally. No internet needed, only a valid clock.
+#
+# SUN MOMENT While the next sun events are used in text, the actual lamp decision uses
+# the current sun elevation, not the calculated sun event clock time.
+# The reason is the sunup/sundown functions return the "next sunup/sundown" and these 
+# glitch to next day when we transition them. The elevation value does not have such  
+# glitch as it returns the current elevation of the sun.
+# To put it simply: we do not check "if (now()>=sundown)" but we check "if (sun<=elevation)" 
+#
+# CLOCK: Without a valid clock the cycle does nothing but the wall switch keeps working.
+# Time is taken from HA (if availible) or NTP 
+# At every WiFi connect the DHCP gateway is made NTP server 1 and a NTP pool server
+# becomes server 2. So no network address is hardcoded.
+#
+# Wall switch: toggles the lamp manually.
+# The cycle is edge based or state based, see SWITCH config explanation below.
+#
+# LABEL: This is a user mnemonic label, so they know which device. Chalet14 or Lamp03
+# Advise is to rename in HA to this as Friendlyname. Ideally this is also used
+# as DHCP/DNS/mDNS hostname, but that does not work yet
+#
+# GROUP: All devices have a groupname, and all in the same GROUP sync themselves.
+# They sync lamp state and config over UDP with plain text packet.
+#
+#   LAMPGROUP:<group>:<PARAMETER>:<value>
+#   LAMPGROUP:<group>:REQUESTCONFIG
+#
+# The group name can not contain a colon. The value is everything after the
+# third colon (times have colons). The parameter is the uppercase ID of the
+# entity:
+#   LAMP         1 / 0      the lamp state itself
+#   USE_SUN      1 / 0
+#   USE_SCHEDULE 1 / 0
+#   TWILIGHT     Normal / Half Civil / Civil
+#   LOC_LAT      decimal degrees
+#   LOC_LON      decimal degrees
+#   TZ_TEXT      POSIX timezone string
+#   SCHEDULE_ON  HH:MM:SS
+#   SCHEDULE_OFF HH:MM:SS
+# Not send are these values, which are unique a each device
+#   GROUP        This is what selects the group.
+#   LABEL        The label is what makes it the device memorable to the operator
+#   USE_SENSOR   Only one might have a sensor, only one might have a switch
+#
+# - Every change of a parameter is broadcast, and a received parameter is
+#   applied, but only when the group name is the same. A value that is already
+#   the same is ignored, so echoes and repeats do nothing.
+# - A received value is not sent on again.
+# - Every lamp also calculates its own cycle. The lamp that gets to a window
+#   edge switches the lamp and broadcasts LAMP, the others follow, so the
+#   first one wins. Without the network each lamp still runs on its own.
+# - The first lamp change after boot / enabling the cycle is not broadcast,
+#   so a rebooting lamp can not override the group. It asks for the group
+#   config instead.
+# - REQUESTCONFIG: sent when WiFi (re)connects and when the group name changes.
+#   Every other lamp in the group answers with all parameters, spread in time.
+#   The requester so gets the same data several times, which is fine.
+#   Own requests are ignored if they come back as an echo.
+# - An empty group name = no sending, no receiving.
+# - Every packet is sent twice: once to the broadcast ${udp_broadcast} and once
+#   to the multicast ${udp_multicast}. UDP is lossy, and two different
+#   destinations are never in the same aggregated WiFi frame.
+#   If the receiver gets both copies, the second one is ignored as the value is
+#   already the same.
+# - A received config change is applied without evaluating the cycle, except
+#   once, shortly after USE_SUN / USE_SCHEDULE, the last of a series. The result 
+#   of that evaluation is not re-broadcast. Only the lamp where the config change
+#   was locally made sends the resulting new lamp state.
+#
+# SENSOR: to configure the input from edge-driven to state driven
+# most devices will not be connected to anything. so does not matter. A few may be
+# connected to a wall switch so a edge should switch, akin to a hotel switch.
+#
+# One device may be connected to a daylight sensor and a very dark sky may turn on the 
+# lights earlier, or turn off later. So state driven. 
+#
+# It also alows all cycle control to be off, and all of this just to work as a broadcaster
+# for a classic light sensor
+# 
+# INFO:
+# "twilight Info" text sensor shows the next calculated sun_up / sun_down.
+#
+# "lamp info" text sensor shows resulting on-off schedule
+#
+# Everything defaults to the safe state at boot: relay off, until the cycle
+# has a valid clock and switches it on when needed.
+# Built for ESPHome 2026.7.x, ESP12F (esp12e). Not yet tested.
+
+substitutions:
+  devicename: outdoor-lamp
+  description: Outdoor lamp controller.
+  prj_version: "2026.10.23.6"
+
+  # Pins
+  # Relay boards often are active low, if so set inverted: true on the relay
+  # Defaults are for a Classic Shelly1 which I use at all of these lantarns
+  # Warning to self: Dont use as is for the newer Shellys
+  GPIO_Status_LED: GPIO2    # onboard LED of most ESP12F modules, active low
+  GPIO_relay:      GPIO5    # onboard relay on my ESP12F based custom PCB's
+  GPIO_wall_input: GPIO13   # first 230V input on my ESP12F based custom PCB's
+
+  # Defaults of the runtime settings, used until the user changes them
+  # for twilight calculations, 1 digit is enough, lets not burden user unput
+  # Default at Tiveden, because that's where I'll be using them, you can put in yours
+#  default_latitude:  "58.7" # Tiveden, SE
+#  default_longitude: "14.6" # Tiveden, SE
+  default_latitude:  "51.6" # Fijnaart, NL
+  default_longitude: "4.5"  # Fijnaart, NL
+  default_timezone:  "CET-1CEST,M3.5.0,M10.5.0/3"   # POSIX string
+  default_group:     "outdoor"
+
+  # UDP group transport. All lamps need the same addresses and port.
+  # Every packet goes to both addresses.
+  udp_broadcast: 255.255.255.255
+  udp_multicast: 239.0.60.53
+  udp_port: "18511"
+
+#######################################################################################
+
+esphome:
+  name: ${devicename}
+  comment: ${description} v${prj_version}
+  friendly_name: ${devicename}
+  name_add_mac_suffix: true  
+  # A text sensor can be edited to hold the user-mnemonic for the actual device
+  # The advise is to rename in HA device into the same
+  # example: Devicename: outdoor-lamp-feabce
+  #          Friendlyname: Chalet36
+  on_boot:
+    priority: -100
+    then:
+      # First GPIO value set from boot is not broadcast
+      # after boot is done, they are processed
+      - lambda: 'id(boot_done) = true;'
+      - script.execute: lamp_update
+
+esp8266:
+  board: esp12e
+  restore_from_flash: true
+
+logger:
+  level: INFO
+
+# This device works without HA, so no reboot needed on loss of HA
+# Note that missing WiFi will still cause an occasional reboot
+api:
+  reboot_timeout: 0s
+
+ota:
+  platform: esphome
+  password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # delay boot, as we update hostname with a configured friendlyname
+  # Works without connectivity, so rarely reboot.
+  # We only need to connect briefly to sync the time-of-day clock,
+  # and to reach the WebUI.
+  reboot_timeout: 24hours
+  # On every (re)connect: NTP from the DHCP gateway, ask the group for its config
+  on_connect:
+#    - script.execute: hostname_apply
+    - script.execute: net_setup
+    - script.execute: group_request
+  ap:
+    ssid: "${devicename} fallback hotspot"
+    # Open on purpose: easier recovery
+
+captive_portal:
+
+# Note: v3 loads its JS from oi.esphome.io, so the WebUI would need internet.
+# unless if we force local at 100KB cost. remove when running on a 1MB flash device
+web_server:
+  port: 80
+  version: 3
+  local: true
+
+
+# Group transport, see the header for the packets
+udp:
+  id: lamp_udp
+  port: ${udp_port}
+  listen_address: ${udp_multicast}
+  # udp.write sends to every address in this list: each packet goes out twice
+  addresses:
+    - ${udp_broadcast}
+    - ${udp_multicast}
+  on_receive:
+    then:
+      - lambda: |-
+          std::string s(data.begin(), data.end());
+          const std::string magic = "LAMPGROUP:";
+          std::string group = id(device_group).state;
+          if (group.empty() || s.compare(0, magic.size(), magic) != 0) {
+            return;
+          }
+
+          // LAMPGROUP:<group>:<param>[:<value>]
+          size_t g_end = s.find(':', magic.size());
+          if (g_end == std::string::npos ||
+              s.substr(magic.size(), g_end - magic.size()) != group) {
+            return;                               // other group
+          }
+          size_t p_end = s.find(':', g_end + 1);
+          std::string param = s.substr(g_end + 1,
+              p_end == std::string::npos ? std::string::npos : p_end - g_end - 1);
+          std::string v = (p_end == std::string::npos) ? "" : s.substr(p_end + 1);
+
+          if (param == "REQUESTCONFIG") {
+            // Not our own request coming back as an echo
+            if (!(id(req_sent) && millis() - id(last_req_ms) < 2000)) {
+              id(group_dump).execute();
+            }
+            return;
+          }
+
+          // Apply, but do not send it on again, and do not evaluate the
+          // cycle on half a config (cfg_hold).
+          id(tx_mute) = true;
+          id(cfg_hold) = true;
+          if (param == "LAMP") {
+            bool on = (v == "1");
+            if (on != id(lamp_output).current_values.is_on()) {
+              if (on) {
+                id(lamp_output).turn_on();
+              } else {
+                id(lamp_output).turn_off();
+              }
+            }
+          } else if (param == "USE_SCHEDULE") {
+            bool on = (v == "1");
+            if (on != id(use_schedule).state) {
+              if (on) {
+                id(use_schedule).turn_on();
+              } else {
+                id(use_schedule).turn_off();
+              }
+            }
+          } else if (param == "USE_SUN") {
+            bool on = (v == "1");
+            if (on != id(use_sun).state) {
+              if (on) {
+                id(use_sun).turn_on();
+              } else {
+                id(use_sun).turn_off();
+              }
+            }
+          } else if (param == "TWILIGHT") {
+            if (id(twilight).has_option(v) &&
+                std::string(id(twilight).current_option()) != v) {
+              id(twilight).make_call().set_option(v).perform();
+            }
+          } else if (param == "LOC_LAT") {
+            float f = atof(v.c_str());
+            if (std::isnan(id(loc_lat).state) || fabsf(f - id(loc_lat).state) > 0.0005f) {
+              id(loc_lat).make_call().set_value(f).perform();
+            }
+          } else if (param == "LOC_LON") {
+            float f = atof(v.c_str());
+            if (std::isnan(id(loc_lon).state) || fabsf(f - id(loc_lon).state) > 0.0005f) {
+              id(loc_lon).make_call().set_value(f).perform();
+            }
+          } else if (param == "TZ_TEXT") {
+            if (!v.empty() && id(tz_text).state != v) {
+              id(tz_text).make_call().set_value(v).perform();
+            }
+          } else if (param == "SCHEDULE_ON" || param == "SCHEDULE_OFF") {
+            int h = 0, m = 0, sec = 0;
+            if (sscanf(v.c_str(), "%d:%d:%d", &h, &m, &sec) == 3 &&
+                h >= 0 && h < 24 && m >= 0 && m < 60 && sec >= 0 && sec < 60) {
+              if (param == "SCHEDULE_ON") {
+                if (id(schedule_on).hour != h || id(schedule_on).minute != m || id(schedule_on).second != sec) {
+                  id(schedule_on).make_call().set_time(h, m, sec).perform();
+                }
+              } else {
+                if (id(schedule_off).hour != h || id(schedule_off).minute != m || id(schedule_off).second != sec) {
+                  id(schedule_off).make_call().set_time(h, m, sec).perform();
+                }
+              }
+            }
+          }
+          id(cfg_hold) = false;
+          id(tx_mute) = false;
+          // The switches come last in a series. Evaluate once, shortly after
+          // the last packet, without broadcasting.
+          if (param == "USE_SCHEDULE" || param == "USE_SUN") {
+            id(eval_quiet).execute();
+          }
+
+
+time:
+  # Two sources, both set the same system clock, so time is valid after a
+  # reboot even if HA is not up yet (or the gateway has no NTP).
+  # The lambdas use ha_time.now(), which reads that shared clock.
+  # The timezone is set from the Timezone text, see lamp_update.
+  - platform: homeassistant
+    id: ha_time
+    on_time_sync:
+      - script.execute: lamp_update
+
+  - platform: sntp
+    id: ntp_time
+    timezone: ${default_timezone}
+    # Start values only.
+    # When WiFi connects, net_setup adds the DHCP gateway
+    # as server 1 and the pool server becomes server 2.
+    servers:
+      - 0.pool.ntp.org
+    on_time_sync:
+      - script.execute: lamp_update
+
+
+# Sun position and sunrise/sunset, calculated locally.
+# Latitude / longitude here are only the start values, lamp_update sets
+# them from the Latitude / Longitude numbers.
+sun:
+  id: sun_sun
+  time_id: ha_time
+  latitude: ${default_latitude}
+  longitude: ${default_longitude}
+
+
+globals:
+  # What the lamp should be by the cycle: -1 unknown, 0 off, 1 on
+  - id: lamp_target
+    type: int
+    initial_value: '-1'
+  # What the cycle last set. -1 = not yet set since boot / enable.
+  - id: lamp_applied
+    type: int
+    initial_value: '-1'
+  # True while a change must not be broadcast (a received one)
+  - id: tx_mute
+    type: bool
+    initial_value: 'false'
+  # True during the first apply after boot / enable: not broadcast either
+  - id: quiet_apply
+    type: bool
+    initial_value: 'false'
+  # True while a config is half changed: lamp_update does nothing
+  - id: cfg_hold
+    type: bool
+    initial_value: 'false'
+  # False while the restored values are put back at boot
+  - id: boot_done
+    type: bool
+    initial_value: 'false'
+  # False until WiFi is up and the group was asked for its config.
+  # Stops the restored values at boot from being broadcast.
+  - id: group_live
+    type: bool
+    initial_value: 'false'
+  # Time of our own last REQUESTCONFIG, to ignore its echo
+  - id: req_sent
+    type: bool
+    initial_value: 'false'
+  - id: last_req_ms
+    type: uint32_t
+    initial_value: '0'
+  # Packets waiting to be sent, one every 20 ms (see group_flush)
+  # we stagger the send of UDP to avoid issues with accasional buffer problems on UDP send
+  - id: udp_queue
+    type: std::vector<std::string>
+
+output:
+  - platform: gpio
+    pin: ${GPIO_relay}
+    id: relay_output
+    # Use "inverted: true" if the relay board is active low
+    
+  
+light:
+  # Visual watchdog, blinked from the interval below
+  - platform: status_led
+    name: "Led"
+    id: led_output
+    pin:
+      number: ${GPIO_Status_LED}
+      inverted: true
+    restore_mode: ALWAYS_OFF
+    internal: true
+
+  # The lamp. Switched by the cycle, the group, the wall switch and HA.
+  # Every change is broadcast, see group_send.
+  - platform: binary
+    output: relay_output
+    name: "Lamp"
+    id: lamp_output
+    icon: mdi:outdoor-lamp
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - script.execute:
+          id: group_send
+          param: "LAMP"
+    on_turn_off:
+      - script.execute:
+          id: group_send
+          param: "LAMP"
+    web_server:
+      sorting_weight: 100
+
+switch:
+  # Use the schedule_on / schedule_off times. See the header.
+  - platform: template
+    name: "Use schedule"
+    id: use_schedule
+    icon: mdi:clock-outline
+    entity_category: config
+    disabled_by_default: true
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    on_turn_on:
+      - script.execute: lamp_update
+      - script.execute:
+          id: group_send
+          param: "USE_SCHEDULE"
+    on_turn_off:
+      - script.execute: lamp_update
+      - script.execute:
+          id: group_send
+          param: "USE_SCHEDULE"
+    web_server:
+      sorting_weight: 200
+
+  # Use the sun. See the header.
+  - platform: template
+    name: "Use sun"
+    id: use_sun
+    icon: mdi:weather-sunny
+    entity_category: config
+    disabled_by_default: true
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    on_turn_on:
+      - script.execute: swap_times
+      - script.execute: lamp_update
+      - script.execute:
+          id: group_send
+          param: "USE_SUN"
+    on_turn_off:
+      - script.execute: swap_times
+      - script.execute: lamp_update
+      - script.execute:
+          id: group_send
+          param: "USE_SUN"
+    web_server:
+      sorting_weight: 202
+
+  # Use wall switch as daylight sensor. See the header.
+  # Whether the input is a state, or an edge switch See the header.
+  - platform: template
+    name: "Use daylight sensor"
+    id: use_sensor
+    entity_category: config
+    disabled_by_default: true
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - script.execute: lamp_update
+    on_turn_off:
+      - script.execute: lamp_update
+    web_server:
+      sorting_weight: 204
+
+binary_sensor:
+  # Wall switch: every press toggles the lamp, whatever its state.
+  # The cycle is edge based, so this never disrupts it. The lamp change
+  # is broadcast like any other.
+  - platform: gpio
+    pin:
+      number: ${GPIO_wall_input}
+      mode: INPUT_PULLUP
+      inverted: true
+    id: wall_switch
+    internal: true
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_state:
+      - if:
+          condition:
+            switch.is_on: use_sensor
+          then:
+            - script.execute: lamp_update
+          else:
+            - if:
+                condition:
+                  # Skip the first published state after boot, so the switch's
+                  # position at power-up does not toggle the lamp.
+                  lambda: 'static bool seen = false; if (!seen) { seen = true; return false; } return true;'
+                then:
+                  - light.toggle: lamp_output
+
+select:
+  # What counts as sun up / down
+  - platform: template
+    name: "Twilight level"
+    id: twilight
+    icon: mdi:weather-sunset
+    optimistic: true
+    restore_value: true
+    options:
+      - Normal
+      - Half Civil
+      - Civil
+    initial_option: Normal
+    entity_category: config
+    disabled_by_default: true
+    web_server:
+      sorting_weight: 205
+    on_value:
+      then:
+        - script.execute: lamp_update
+        - script.execute:
+            id: group_send
+            param: "TWILIGHT"
+
+
+number:
+  # Location latitude and Longitude for sun calculations
+  # for sun calculations, 1 digit is enough, lets not make input too difficult
+  - platform: template
+    name: "Location Latitude"
+    id: loc_lat
+    icon: mdi:latitude
+    entity_category: config
+    disabled_by_default: true
+    optimistic: true
+    restore_value: true
+    initial_value: ${default_latitude}
+    min_value: -90
+    max_value: 90
+    step: 0.1
+    mode: box
+    unit_of_measurement: "°"
+    web_server:
+      sorting_weight: 240
+    on_value:
+      then:
+        - script.execute: lamp_update
+        - script.execute:
+            id: group_send
+            param: "LOC_LAT"
+
+  - platform: template
+    name: "Location Longitude"
+    id: loc_lon
+    icon: mdi:longitude
+    entity_category: config
+    disabled_by_default: true
+    optimistic: true
+    restore_value: true
+    initial_value: ${default_longitude}
+    min_value: -180
+    max_value: 180
+    step: 0.1
+    mode: box
+    unit_of_measurement: "°"
+    web_server:
+      sorting_weight: 250
+    on_value:
+      then:
+        - script.execute: lamp_update
+        - script.execute:
+            id: group_send
+            param: "LOC_LON"
+
+
+text:
+  # Short memorable unique user assigned name, potentially 
+  # used for DNS/DHCP and advised as renamed friendly name in HA
+  - platform: template
+    name: "Device Label"
+    id: device_label
+    icon: "mdi:tag-text"
+    mode: text
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_value: ""
+    min_length: 0
+    max_length: 32
+    web_server:
+      sorting_weight: 110
+    on_value:
+      then:
+        # Hostname-safe: letters, digits and inner dashes only. Empty is allowed.
+        # Capitals are also allowed. Ignored by DNS, but allowed visually
+        - lambda: |-
+            std::string h;
+            for (char c : x) {
+              if (isalnum((unsigned char) c)) {
+                h += c;
+              } else if (!h.empty() && h.back() != '-') {
+                h += '-';
+              }
+            }
+            while (!h.empty() && h.back() == '-') h.pop_back();
+            if (h != x) {
+              id(device_label).make_call().set_value(h).perform();
+              id(device_label).publish_state(h);   // force the clean text to the front end
+            }
+
+  # Name of the lamp group. Not broadcast: it selects the group. A new
+  # name asks that group for its config.
+  - platform: template
+    name: "Device Group"
+    id: device_group
+    icon: mdi:lightbulb-group-outline
+    mode: text
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_value: "${default_group}"
+    min_length: 0
+    max_length: 32
+    web_server:
+      sorting_weight: 120
+    on_value:
+      then:
+        - script.execute: group_request
+    
+  # POSIX timezone string, see the header
+  - platform: template
+    name: "Timezone"
+    id: tz_text
+    icon: mdi:map-clock
+    mode: text
+    entity_category: config
+    disabled_by_default: true
+    optimistic: true
+    restore_value: true
+    initial_value: "${default_timezone}"
+    min_length: 1
+    max_length: 64
+    web_server:
+      sorting_weight: 260
+    on_value:
+      then:
+        - script.execute: lamp_update
+        - script.execute:
+            id: group_send
+            param: "TZ_TEXT"
+
+
+datetime:
+  # Time points of the cycle.
+  # Morning window starts at schedule_on, evening window ends at schedule_off.
+  - platform: template
+    type: time
+    name: "Schedule on"
+    id: schedule_on
+    entity_category: config
+    disabled_by_default: true
+    optimistic: true
+    restore_value: true
+    initial_value: "05:30:00"
+    web_server:
+      sorting_weight: 220
+    on_value:
+      then:
+        - script.execute: lamp_update
+        - script.execute:
+            id: group_send
+            param: "SCHEDULE_ON"
+
+  - platform: template
+    type: time
+    name: "Schedule off"
+    id: schedule_off
+    entity_category: config
+    disabled_by_default: true
+    optimistic: true
+    restore_value: true
+    initial_value: "23:00:00"
+    web_server:
+      sorting_weight: 230
+    on_value:
+      then:
+        - script.execute: lamp_update
+        - script.execute:
+            id: group_send
+            param: "SCHEDULE_OFF"
+
+
+script:
+  # Decide what the cycle wants, and switch the lamp only when that changed.
+  # Called on cycle enable, setting changes, time sync, boot and every
+  # minute (so changed time points and the moving sun times are picked up).
+  - id: lamp_update
+    mode: restart
+    then:
+      - lambda: |-
+
+          // unknown until proven otherwise:
+          id(lamp_target) = -1;   // unknown until proven otherwise
+
+          // If we are in the midle of a multi-step config change:
+          // like a UDP receive or a time swap, skip this lamp_update:
+          if (id(cfg_hold)) {
+            return;
+          }
+
+          // If any of TimeZone, Lat or Lon is empty, use HA Runtime settings:
+          // for clock and sun calculation:
+          if (!id(tz_text).state.empty()) {
+            id(ha_time).set_timezone(id(tz_text).state);
+          }
+          if (!std::isnan(id(loc_lat).state)) {
+            id(sun_sun).set_latitude(id(loc_lat).state);
+          }
+          if (!std::isnan(id(loc_lon).state)) {
+            id(sun_sun).set_longitude(id(loc_lon).state);
+          }
+
+          // Twilight level; Normal, Half Civil, Civil:
+          static const double elevations[] = {-0.833, -3.0, -6.0};
+          size_t lvl = id(twilight).active_index().value_or(0);
+          if (lvl > 2) {
+            lvl = 0;
+          }
+
+          auto t = id(ha_time).now();
+          bool sun = id(use_sun).state;
+          bool scd = id(use_schedule).state;
+          bool sns = id(use_sensor).state;
+          char buf[48];
+
+          // All off; the cycle does nothing. Forget the applied state, so the:
+          // next one counts as a first state and is not broadcast:
+          if (!sun && !scd && !sns)  {
+            id(lamp_applied) = -1;
+            snprintf(buf, sizeof(buf), "Manual switch only");
+            id(lamp_info).publish_state(buf);
+            return;
+          }
+
+          // Sensor only; classic outdoor light sensor is broadcasted:
+          if (!sun && !scd && sns) {
+            // Sensor only: the lamp follows the sensor, broadcast as LAMP
+            id(lamp_target) = id(wall_switch).state ? 1 : 0;
+            snprintf(buf, sizeof(buf), "Broadcast daylight sensor");
+            id(lamp_info).publish_state(buf);
+            return;
+          }
+
+          // No valid clock; the cycle does nothing. Forget the applied state, so the:
+          // next one counts as a first state and is not broadcast:
+          if (!t.is_valid()) {
+            id(lamp_applied) = -1;
+            snprintf(buf, sizeof(buf), "No valid clock, manual only");
+            id(lamp_info).publish_state(buf);
+            return;
+          }
+
+          // Sun and/or Schedule active and a valid time: process the cycle
+          int m   = t.hour * 60 + t.minute;
+          int on  = id(schedule_on).hour  * 60 + id(schedule_on).minute;
+          int off = id(schedule_off).hour * 60 + id(schedule_off).minute;
+
+          // Is minute m inside the window s..e? (s = start, e = end):
+          // The clock wraps at midnight, so e before s crosses midnight:
+          // A window longer than cap, or empty, counts as no window:
+          auto in_window = [](int m, int s, int e, int cap) -> bool {
+            int len = (e - s + 1440) % 1440;
+            if (len == 0 || len > cap) {
+              return false;
+            }
+            return ((m - s + 1440) % 1440) < len;
+          };
+
+          if (sun) {
+            // Decision by elevation: continuous, no date rollover jump.
+            // Wall_switch: when use_sensor this will widen light on period
+            const double thr = elevations[lvl];
+            bool dark  = id(sun_sun).elevation() < thr || (sns && id(wall_switch).state);
+            bool pause = in_window(m, off, on, 1440);   // off..on, sun + times
+            id(lamp_target) = (dark && !(scd && pause)) ? 1 : 0;
+
+            // Info text only, never feeds the decision:
+            auto up = id(sun_sun).sunrise(thr);
+            auto dn = id(sun_sun).sunset(thr);
+            if (up.has_value() && dn.has_value()) {
+              snprintf(buf, sizeof(buf), "Next sun up %02d:%02d down %02d:%02d",
+                       up->hour, up->minute, dn->hour, dn->minute);
+              id(twilight_info).publish_state(buf);
+              if (scd) {
+                snprintf(buf, sizeof(buf), "%02d:%02d-%02d:%02d and %02d:%02d-%02d:%02d",
+                         id(schedule_on).hour, id(schedule_on).minute,
+                         up->hour, up->minute, dn->hour, dn->minute,
+                         id(schedule_off).hour, id(schedule_off).minute);
+              } else {
+                snprintf(buf, sizeof(buf), "%02d:%02d-%02d:%02d",
+                         dn->hour, dn->minute, up->hour, up->minute);
+              }
+            } else {
+              id(twilight_info).publish_state("No sunrise/sunset today");
+              if (scd) {
+                snprintf(buf, sizeof(buf), "Follows sun, off %02d:%02d-%02d:%02d",
+                         id(schedule_off).hour, id(schedule_off).minute,
+                         id(schedule_on).hour, id(schedule_on).minute);
+              } else {
+                snprintf(buf, sizeof(buf), "Follows sun level");
+              }
+            }
+            id(lamp_info).publish_state(buf);
+
+          } else {
+            if (scd) {
+              // no Sun & Schedule: on from schedule_on to schedule_off, any length
+              // Schedule only: the entire night, any length
+              // Wall_switch: when use_sensor this will widen light on period
+              id(lamp_target) = (in_window(m, on, off, 1440) || (sns && id(wall_switch).state)) ? 1 : 0;
+              snprintf(buf, sizeof(buf), "%02d:%02d-%02d:%02d",
+                       id(schedule_on).hour, id(schedule_on).minute,
+                       id(schedule_off).hour, id(schedule_off).minute);
+              id(lamp_info).publish_state(buf);
+            }
+          }
+
+      - if:
+          condition:
+            lambda: 'return id(lamp_target) >= 0 && id(lamp_target) != id(lamp_applied);'
+          then:
+            # The first apply after boot / enable is not broadcast. If the
+            # group has another state, its answer to REQUESTCONFIG wins.
+            - lambda: 'id(quiet_apply) = (id(lamp_applied) < 0);'
+            - if:
+                condition:
+                  lambda: 'return id(lamp_target) == 1;'
+                then:
+                  - light.turn_on: lamp_output
+                else:
+                  - light.turn_off: lamp_output
+            - lambda: |-
+                id(quiet_apply) = false;
+                id(lamp_applied) = id(lamp_target);
+
+  # Swap schedule_on and schedule_off, when Use sun is switched by a person.
+  # Not at boot (restore), and not from the group (it sends the times).
+  # cfg_hold keeps lamp_update from seeing the half swapped times.
+  - id: swap_times
+    then:
+      - if:
+          condition:
+            lambda: 'return id(boot_done) && !id(tx_mute);'
+          then:
+            - lambda: |-
+                int on_h = id(schedule_on).hour,  on_m = id(schedule_on).minute,  on_s = id(schedule_on).second;
+                int off_h = id(schedule_off).hour, off_m = id(schedule_off).minute, off_s = id(schedule_off).second;
+                id(cfg_hold) = true;
+                id(schedule_on).make_call().set_time(off_h, off_m, off_s).perform();
+                id(schedule_off).make_call().set_time(on_h, on_m, on_s).perform();
+                id(cfg_hold) = false;
+
+  # After a received USE_SUN / USE_SCHEDULE: let the rest of the series arrive,
+  # then evaluate the cycle once, without broadcasting.
+  - id: eval_quiet
+    mode: restart
+    then:
+      - delay: 500ms
+      - lambda: 'id(tx_mute) = true;'
+      - script.execute: lamp_update
+      - lambda: 'id(tx_mute) = false;'
+
+  # NTP server = DHCP gateway, assumed to run NTP. Server 2 stays the pool,
+  # needs internet, harmless without. configTime restarts the SNTP client and
+  # also resets the timezone, so that is put back at once.
+  - id: net_setup
+    mode: restart
+    then:
+      - lambda: |-
+          IPAddress gw = WiFi.gatewayIP();
+          if (gw != IPAddress(0, 0, 0, 0)) {
+            static char ntp_buf[16];      // must stay valid, SNTP keeps the pointer
+            snprintf(ntp_buf, sizeof(ntp_buf), "%u.%u.%u.%u", gw[0], gw[1], gw[2], gw[3]);
+            configTime(0, 0, ntp_buf, "0.pool.ntp.org");
+            if (!id(tz_text).state.empty()) {
+              id(ha_time).set_timezone(id(tz_text).state);
+            }
+          }
+
+  # Send one parameter to the group. The value is made here from the
+  # parameter name, which is the uppercase ID.
+  - id: group_send
+    parameters:
+      param: string
+    then:
+      - if:
+          condition:
+            lambda: 'return id(group_live) && !id(tx_mute) && !id(quiet_apply) && !id(device_group).state.empty();'
+          then:
+            - lambda: |-
+                std::string v;
+                char b[24];
+                if (param == "LAMP") {
+                  v = id(lamp_output).current_values.is_on() ? "1" : "0";
+                } else if (param == "USE_SCHEDULE") {
+                  v = id(use_schedule).state ? "1" : "0";
+                } else if (param == "USE_SUN") {
+                  v = id(use_sun).state ? "1" : "0";
+                } else if (param == "TWILIGHT") {
+                  v = std::string(id(twilight).current_option());
+                } else if (param == "LOC_LAT") {
+                  snprintf(b, sizeof(b), "%.3f", id(loc_lat).state);
+                  v = b;
+                } else if (param == "LOC_LON") {
+                  snprintf(b, sizeof(b), "%.3f", id(loc_lon).state);
+                  v = b;
+                } else if (param == "TZ_TEXT") {
+                  v = id(tz_text).state;
+                } else if (param == "SCHEDULE_ON") {
+                  snprintf(b, sizeof(b), "%02d:%02d:%02d",
+                           id(schedule_on).hour, id(schedule_on).minute, id(schedule_on).second);
+                  v = b;
+                } else if (param == "SCHEDULE_OFF") {
+                  snprintf(b, sizeof(b), "%02d:%02d:%02d",
+                           id(schedule_off).hour, id(schedule_off).minute, id(schedule_off).second);
+                  v = b;
+                }
+                std::string pre = "LAMPGROUP:" + id(device_group).state + ":" + param + ":";
+                // Only the latest value of a parameter matters: replace a queued one
+                for (auto &q : id(udp_queue)) {
+                  if (q.compare(0, pre.size(), pre) == 0) {
+                    q = pre + v;
+                    return;
+                  }
+                }
+                if (id(udp_queue).size() < 24) {
+                  id(udp_queue).push_back(pre + v);
+                }
+            - if:
+                condition:
+                  not:
+                    script.is_running: group_flush
+                then:
+                  - script.execute: group_flush
+
+  # Ask the group for its config. On WiFi connect and on group change.
+  # The short wait lets the network come up. From here on changes are sent.
+  - id: group_request
+    mode: restart
+    then:
+      - delay: 3s
+      - lambda: |-
+          id(group_live) = true;
+          id(req_sent) = true;
+          id(last_req_ms) = millis();
+      - if:
+          condition:
+            lambda: 'return !id(device_group).state.empty();'
+          then:
+            - udp.write:
+                id: lamp_udp
+                data: !lambda |-
+                  std::string s = "LAMPGROUP:" + id(device_group).state + ":REQUESTCONFIG";
+                  return std::vector<uint8_t>(s.begin(), s.end());
+
+  # Answer a REQUESTCONFIG: send everything, spread in time so the answers of
+  # several lamps do not all arrive at once.
+  - id: group_dump
+    mode: restart
+    then:
+      - delay: !lambda 'return random_uint32() % 500;'
+      - script.execute:
+          id: group_send
+          param: "LAMP"
+      - delay: 50ms
+      - script.execute:
+          id: group_send
+          param: "TWILIGHT"
+      - delay: 50ms
+      - script.execute:
+          id: group_send
+          param: "LOC_LAT"
+      - delay: 50ms
+      - script.execute:
+          id: group_send
+          param: "LOC_LON"
+      - delay: 50ms
+      - script.execute:
+          id: group_send
+          param: "TZ_TEXT"
+      - delay: 50ms
+      - script.execute:
+          id: group_send
+          param: "SCHEDULE_ON"
+      - delay: 50ms
+      - script.execute:
+          id: group_send
+          param: "SCHEDULE_OFF"
+      - delay: 50ms
+      - script.execute:
+          id: group_send
+          param: "USE_SUN"
+      - delay: 50ms
+      - script.execute:
+          id: group_send
+          param: "USE_SCHEDULE"
+
+  # Send the queued packets one by one, 20 ms apart, so a burst of changes
+  # (use_sun + time swap) does not exhaust the network buffers.
+  - id: group_flush
+    mode: single
+    then:
+      - while:
+          condition:
+            lambda: 'return !id(udp_queue).empty();'
+          then:
+            - udp.write:
+                id: lamp_udp
+                data: !lambda |-
+                  std::string s = id(udp_queue).front();
+                  return std::vector<uint8_t>(s.begin(), s.end());
+            - lambda: 'id(udp_queue).erase(id(udp_queue).begin());'
+            - delay: 20ms
+
+#  # Hostname from the label, applied after ESPHome's own apply at connect.
+#  - id: hostname_apply
+#    mode: restart
+#    then:
+#      - delay: 2s
+#      - lambda: |-
+#          const std::string &h = id(device_label).state;
+#          if (h.empty() || h == wifi_station_get_hostname()) {
+#            return;
+#          }
+#          wifi_station_set_hostname(const_cast<char *>(h.c_str()));
+#          for (netif *intf = netif_list; intf; intf = intf->next) {
+#            intf->hostname = wifi_station_get_hostname();
+#          }
+#          wifi_station_set_hostname(const_cast<char *>(h.c_str()));
+#          //wifi_station_dhcpc_stop();
+#          //wifi_station_dhcpc_start();
+#          for (netif *intf = netif_list; intf; intf = intf->next) {
+#            intf->hostname = wifi_station_get_hostname();
+#            if (netif_dhcp_data(intf) != nullptr) {
+#              dhcp_renew(intf);
+#            }
+#          }
+
+
+interval:
+  # Every 10 seconds blink the LED for 0.1 s: visual "still running"
+  - interval: 10seconds
+    then:
+      - light.toggle: led_output
+      - delay: 0.1s
+      - light.toggle: led_output
+
+  # Every minute re-evaluate the cycle
+  - interval: 1min
+    then:
+      - script.execute: lamp_update
+
+
+button:
+  - platform: restart
+    name: "_Restart"
+    disabled_by_default: true
+    entity_category: diagnostic
+
+  - platform: factory_reset
+    name: "_Restart Factory Default"
+    disabled_by_default: true
+    entity_category: diagnostic
+
+
+sensor:
+  - platform: uptime
+    name: "_Uptime"
+    disabled_by_default: true
+    entity_category: diagnostic
+
+  - platform: wifi_signal
+    name: "_Wi-Fi Signal"
+    update_interval: 60s
+    disabled_by_default: true
+    entity_category: diagnostic
+
+
+text_sensor:
+  # Calculated sun times of today
+  - platform: template
+    name: "Twilight Info"
+    id: twilight_info
+    icon: mdi:weather-sunset
+    update_interval: never
+    disabled_by_default: true
+    web_server:
+      sorting_weight: 210
+
+  # Calculated lamp times of today
+  - platform: template
+    name: "Lamp Schedule"
+    id: lamp_info
+    icon: mdi:lightbulb-auto-outline
+    update_interval: never
+    web_server:
+      sorting_weight: 130
+
+  - platform: wifi_info
+    ip_address:
+      name: "_IP Address"
+      disabled_by_default: true
+    ssid:
+      name: "_Wi-Fi SSID"
+      disabled_by_default: true
+    bssid:
+      name: "_Wi-Fi BSSID"
+      disabled_by_default: true
+
+  - platform: version
+    name: "_ESPHome Version"
+    hide_timestamp: true
+    disabled_by_default: true
+    entity_category: diagnostic
+
+
+# END OF CONFIGURATION   name: outdoor-lamp.yaml
