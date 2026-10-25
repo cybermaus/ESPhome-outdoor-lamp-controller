@@ -10,7 +10,7 @@ A small ESPHome controller for outdoor lamps: one relay, one wall input, and a d
 
 **It works with or without stable network.** It only needs to sync time once, for example when the lamp is placed far from the WiFi. Each lamp calculates its own cycle. For the rest there is no reliance on connectivity, internet service, or any central controller like Home Assistant. If the WiFi, Home Assistant or the router goes away, the lamps keep switching right up to the next power cycle. 
 
-**Yet despite relying on centralized control, multiple devices still work as one.** Lamps that share a group name configure and switch together, and show up in Home Assistant. Change a setting on one lamp and the whole group is updated. Whichever lamp reaches a switching moment first moves the group, and the others follow virtually instantly, so they also visually appear as a single wired lamp. A rebooting or reconnecting lamp asks the group what is going on instead in case it missed any configuration updates. 
+**Yet despite not relying on centralized control, multiple devices still work as one.** Lamps that share a group name configure and switch together, and show up in Home Assistant. Change a setting on one lamp and the whole group is updated. Whichever lamp reaches a switching moment first moves the group, and the others follow virtually instantly, so they also visually appear as a single wired lamp. A rebooting or reconnecting lamp asks the group what is going on instead in case it missed any configuration updates. 
 
 | Switch | The lamp is driven by |
 |---|---|
