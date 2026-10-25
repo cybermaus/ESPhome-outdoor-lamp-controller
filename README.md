@@ -2,23 +2,23 @@
 
 A small ESPHome controller for outdoor lamps: one relay, one wall input, and a daily cycle that follows the sun, a schedule, a light sensor, or any mix of them.
 
-Built for an ESP12F (ESP8266) and ESPHome 2026.7.x. Work in progress: tested on single devices, group behaviour is being tested on real hardware.
-
 ## Usage
 
 ### What it does
 
-**It works with or without a network.** Each lamp calculates its own cycle. It only needs a valid clock, from Home Assistant or NTP. No cloud, no internet service, no central controller. If WiFi, Home Assistant or the router goes away, the lamps keep switching.
+**It switches outdoor lamps on a sun based schedule.** Simple enough. 
 
-**Yet despite lack of centralized conrol, multiple devices still work as one.** Lamps that share a group name configure and switch together, and show up in Home Assistant. Change a setting on one lamp and the whole group is updated. Whichever lamp reaches a switching moment first moves the group, and the others follow virtually instandly. A rebooting lamp asks the group what is going on instead of overriding it.
+**It works with or without stable network.** It only needs to sync time once, for example when the lamp is placed far from the WiFi. Each lamp calculates its own cycle. For the rest there is no reliance on connectivity, internet service, or any central controller like Home Assistant. If the WiFi, Home Assistant or the router goes away, the lamps keep switching right up to the next power cycle. 
 
-**Pick the cycle you want.** Three switches decide what drives the lamp:
+**Yet despite relying on centralized control, multiple devices still work as one.** Lamps that share a group name configure and switch together, and show up in Home Assistant. Change a setting on one lamp and the whole group is updated. Whichever lamp reaches a switching moment first moves the group, and the others follow virtually instantly, so they also visually appear as a single wired lamp. A rebooting or reconnecting lamp asks the group what is going on instead in case it missed any configuration updates. 
 
 | Switch | The lamp is driven by |
 |---|---|
 | Use sun | Sun up and sun down, calculated locally |
 | Use schedule | One pair of on / off times |
 | Use daylight sensor | An external light sensor on the wall input |
+
+<img width="702" height="121" alt="image" src="https://github.com/user-attachments/assets/5af03ed3-9612-4dd1-9887-a7aff4ce18fd" />
 
 They combine in the way you would expect:
 
@@ -36,6 +36,10 @@ They combine in the way you would expect:
 **A real wall switch.** Without the sensor, the wall input acts as a hotel switch: every flip of the switch toggles the lamp, up or down, and the whole group follows. A manual switch stays until the cycle next changes its mind.
 
 **Know what it will do.** Two text sensors show the next sun up and sun down, and the resulting lamp times.
+
+### All settings
+
+<img width="700" height="677" alt="image" src="https://github.com/user-attachments/assets/9c755008-fd48-4ea6-a985-16a26015acf0" />
 
 ### Quick start
 
@@ -95,10 +99,11 @@ The time comes from Home Assistant or from NTP. On every WiFi connect the lamp t
 
 | Use sun | Use schedule | Sensor | Result |
 |---|---|---|---|
-| On | Off | Off | On while it is dark, the whole night |
+| On | Off | Off | On while the sun is down, the whole night |
 | Off | On | Off | On from Schedule on to Schedule off |
-| On | On | Off | On while dark, except between Schedule off and Schedule on |
-| Any | Any | On | Same as above, and also on while the sensor says dark, except in the night pause of sun + schedule |
+| On | On | Off | On while the sun is down, except between Schedule off and Schedule on |
+| Any | Any | On | On dark days, turn on a bit earlier, turn off a bit later, as driven by the sensor. |
+| On | On | On | like above, but do not keep on at night. |
 | Off | Off | On | Lamp follows the sensor |
 | Off | Off | Off | No cycle, manual only |
 
@@ -113,10 +118,10 @@ Times may be past midnight. Schedule off at 00:30 is fine, and so is a schedule 
 | Twilight level | Sun elevation |
 |---|---|
 | Normal | -0.833 degrees, the official sunrise and sunset |
-| Half Civil | -3 degrees |
-| Civil | -6 degrees, the lamp is on longer |
+| Half Civil | -3 degrees, adds about 15 minutes of daylight|
+| Civil | -6 degrees, adds about 30 minutes |
 
-The info text shows the next sun up and sun down. The lamp does not use those times for its decision. It looks at the current elevation of the sun, so nothing jumps at midnight or at sunset.
+Check the actual info text for actual times, as the "about 15 minutes" is in moderate conditions. But far up north near midsummer can add infinite time (sun never sets or rises)
 
 ### Wall switch and daylight sensor
 
