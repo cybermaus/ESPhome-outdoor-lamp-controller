@@ -10,12 +10,14 @@
 # configure as one, switch as one, report into HA. They behave as if they are centralized
 # but when all connections drop, they continue to work
 #
-#
-# Control wise, the device has 3 explicit and 1 implicit factors driving the daily cycle
+# Control wise, the device has 4 inputs driving the lamp:
 #   USE_SUN      : lamp driven by sun up and sun down
 #   USE_SCHEDULE : lamp driven by a single pair of on/off times
-#   USE_SENSOR   : lamp driven by an external light sensor
-#   and any connected wall switch will simply switch the lights as manual event
+#   SENSOR       : an external daylight sensor says it is dark
+#   MOTION       : an external motion sensor says someone is there
+# plus the wall switch, which is either a hotel/hallway switch (toggles the
+# lamp on every edge) or a hardware input for SENSOR or MOTION, see INPUTS.
+#
 # When combined, these interact
 #   SUN+SCHEDULE : On at sundown, off at schedule, on at schedule, off at sunup
 #                  For example, on from 05h30-sunup and on from sundown to 23h00
@@ -24,10 +26,9 @@
 #   SENSOR+SCHED : On at sensor dark, but we go off at and on at night
 #                  For example, on from 05h30-light and on from dark to 23h00
 #   Similar intuitive use cases exist for the other permutations.
-#   When the sensor is configured, the input can still be a wall switch but now
-#   it switches the lamp by switch state rather then switch event, like a normal switched lamp
+#   MOTION is not part of these combinations, it overrides them, see INPUTS.
 #
-# The scedule is a simple day schedule. No weekend vs weekday, no extra late on saturday.
+# The schedule is a simple day schedule. No weekend vs weekday, no extra late on saturday.
 # only a single pair of on/off is provided. 
 #
 # Code was added for many edge cases:
@@ -37,7 +38,7 @@
 #   a weird conditional construct, assume it is for a edge case. I hope a nearby
 #   comment line will explain which one.
 #
-# All devices configure and work as one by means of UDP broad and multicast.
+# All devices configure and work as one by means of UDP broadcast.
 # Even though each device does its own calculations, it also turns on based on broadcast
 # so they all switch at the exact same moment even when their cycles run a few seconds out of step
 #  
@@ -51,10 +52,6 @@
 #   Schedule only  schedule_on -> schedule_off         (no sun involved)
 #   Neither        the cycle does nothing: the lamp is only switched by the
 #                  wall switch or by HA or by any group member with a wall switch
-#
-# USE_SUN change: as a courtesy to the operator, changing this also swaps
-# the schedule_on and schedule_off times, as the obvious on-in-evening becomes 
-# on-in-early-morning. User will likely still choose different values though.
 #
 # Sun level select, what counts as sun up / down (with Use sun on):
 #   Normal      -0.833 degrees, the official sunrise / sunset
@@ -74,13 +71,11 @@
 # glitch as it returns the current elevation of the sun.
 # To put it simply: we do not check "if (now()>=sundown)" but we check "if (sun<=elevation)" 
 #
-# CLOCK: Without a valid clock the cycle does nothing but the wall switch keeps working.
+# CLOCK: Without a valid clock the sun and schedule cycle does nothing. The wall
+# switch, SENSOR and MOTION keep working, as a missing clock must not disable a light.
 # Time is taken from HA (if availible) or NTP 
 # When we have a valid clock, reboots are avoided, instead prolonged loss of connectivity 
 # will cycle the WiFi module. After 7 days of no connectivity, we give in and reboot
-#
-# Wall switch: toggles the lamp manually.
-# The cycle is edge based or state based, see SWITCH config explanation below.
 #
 # LABEL: This is a user mnemonic label, so they know which device. Chalet14 or Lamp03
 # Advise is to rename in HA to this as Friendlyname. Ideally this is also used
@@ -90,12 +85,17 @@
 # They sync lamp state and config over UDP with plain text packet.
 #
 #   LAMPGROUP:<group>:<PARAMETER>:<value>
-#   LAMPGROUP:<group>:REQUESTCONFIG
+#   LAMPGROUP:<group>:REQCONFIG
+#   LAMPGROUP:<group>:RECONNECT
 #
 # The group name can not contain a colon. The value is everything after the
 # third colon (times have colons). The parameter is the uppercase ID of the
 # entity:
 #   LAMP         1 / 0      the lamp state itself
+#   SENSOR       1 / 0      a daylight sensor somewhere in the group says dark
+#   MOTION       1 / 0      a motion sensor somewhere in the group says motion
+#   (LAMP, SENSOR and MOTION are state: not part of the config dump or of the
+#    9 parameters that make a lamp synced)
 #   USE_SUN      1 / 0
 #   USE_SCHEDULE 1 / 0
 #   TWILIGHT     Normal / Half Civil / Civil
@@ -107,42 +107,43 @@
 # Not send are these values, which are unique a each device
 #   GROUP        This is what selects the group.
 #   LABEL        The label is what makes it the device memorable to the operator
-#   USE_SENSOR   Only one might have a sensor, only one might have a switch
+#   USE_SENSOR   Some devices might have a light sensor
+#   USE_MOTION   Some devices might have a motion sensor 
+#                Note that no sensor input implies a hotel/hallway wall switch
 #
-# - Every change of a parameter is broadcast, and a received parameter is
-#   applied, but only when the group name is the same. A value that is already
-#   the same is ignored, so echoes and repeats do nothing.
-# - A received value is not sent on again.
-# - Every lamp also calculates its own cycle. The lamp that gets to a window
-#   edge switches the lamp and broadcasts LAMP, the others follow, so the
-#   first one wins. Without the network each lamp still runs on its own.
-# - The first lamp change after boot / enabling the cycle is not broadcast,
-#   so a rebooting lamp can not override the group. It asks for the group
-#   config instead.
-# - REQUESTCONFIG: sent when WiFi (re)connects and when the group name changes.
-#   Every other lamp in the group answers with all parameters, spread in time.
-#   The requester so gets the same data several times, which is fine.
-#   Own requests are ignored if they come back as an echo.
-# - An empty group name = no sending, no receiving.
-# - Every packet is sent twice: once to the broadcast ${udp_broadcast} and once
-#   to the multicast ${udp_multicast}. UDP is lossy, and two different
-#   destinations are never in the same aggregated WiFi frame.
-#   If the receiver gets both copies, the second one is ignored as the value is
-#   already the same.
-# - A received config change is applied without evaluating the cycle, except
-#   once, shortly after USE_SUN / USE_SCHEDULE, the last of a series. The result 
-#   of that evaluation is not re-broadcast. Only the lamp where the config change
-#   was locally made sends the resulting new lamp state.
+# - Every lamp calculates its own cycle. The lamp that gets to a light state first 
+#   switches its own lamp and broadcasts LAMP so the others follow, so the
+#   first one wins but all lamps appear to switch exactly at the same time.
+#   Without the network each lamp still runs on its own with a few seconds variation.
 #
-# SENSOR: to configure the input from edge-driven to state driven
-# most devices will not be connected to anything. so does not matter. A few may be
-# connected to a wall switch so a edge should switch, akin to a hotel switch.
+# - Read the section about sync strategy below for more details
 #
-# One device may be connected to a daylight sensor and a very dark sky may turn on the 
-# lights earlier, or turn off later. So state driven. 
+# INPUTS: SENSOR and MOTION actions versus the USE_SENSOR and USE_MOTION switches
 #
-# It also alows all cycle control to be off, and all of this just to work as a broadcaster
-# for a classic light sensor
+# SENSOR and MOTION are actions (state). They can be set by HA, by the wall switch
+# input, or by a received packet. They are distributed: the lamp that is activated
+# tells the group, so an HA automation only needs to drive one device.
+#
+# USE_SENSOR and USE_MOTION are config: they say that the wall switch input is
+# wired to such a sensor and sets the action. That is hardware, so they are not
+# distributed. They are mutually exclusive: turning one on turns the other off.
+# With both off, the input is a hotel/hallway switch, toggling on every edge.
+#
+# SENSOR  Forces "dark". With USE_SUN, or schedule only, it widens the dark.
+#         Without sun and schedule, SENSOR simply turns the lamp on.
+#         It never overrides the night pause or a manual switch.
+#         With only SENSOR configured, the device is a classic light sensor
+#         broadcaster, the other lamps follow it.
+# MOTION  While on, and the sun is below the level (regardless of USE_SUN or
+#         USE_SCHEDULE), the lamp is on. It overrides the night pause.
+#         Without a valid clock it simply turns the lamp on.
+# When SENSOR or MOTION turns off, lamp_update runs and the lamp returns to
+# the state of the normal cycle.
+#
+# Stuck states: a received MOTION or SENSOR expires after 10 min. The lamp that
+# originated it repeats MOTION, SENSOR and LAMP every 5 min while it is on, which
+# also refreshes the expiry on the others. LAMP and the actions are sent both,
+# so a LAMP that arrives from a sensor edge is harmless: an equal value is ignored.
 # 
 # INFO:
 # "twilight Info" text sensor shows the next calculated sun_up / sun_down.
@@ -151,20 +152,95 @@
 #
 # Everything defaults to the safe state at boot: relay off, until the cycle
 # has a valid clock and switches it on when needed.
-# Built for ESPHome 2026.7.x, ESP12F (esp12e). Not yet tested.
+#
+#
+# DEVICE SYNC STRATEGY
+#
+# Transport: UDP broadcast only, port ${udp_port}. Every packet is sent twice,
+# because UDP is lossy. Multicast tried but dropped on IGMP snooping issues
+#
+# Every parameter change is broadcast as LAMPGROUP:<group>:<PARAM>:<value>.
+# A received value, if different, is applied but not re-sent.
+# Subsequent packets are queued 20 ms apart
+# Purely local parameters are not send: GROUP, LABEL, USE_SENSOR, USE_MOTION
+#
+# The lamp itself: The first lamp state restore after boot is not broadcast
+#
+# FLAGS
+#   group_synced    Remembered across reboots. "My config is current, I may
+#                   answer other lamps." Cleared by a user change of GROUP.
+#   group_peers     Remembered across reboots. "I have seen another lamp in
+#                   my group." Set by any packet from the group. Cleared by a
+#                   user change of GROUP.
+#   sync_is_suspect Found at boot, not remembered: synced but never saw peers.
+#                   A lone device that may have been moved (workbench lamp) and
+#                   may hold wrong config. Cleared by a full set, by the
+#                   alone-check, or by a GROUP change.
+#
+#
+# PACKETS
+#   REQCONFIG   "Send me your config." Sent at once after a user changes the GROUP,
+#               and about 5 s after connecting when we were never synced.
+#   RECONNECT   "I just (re)connected." Sent after boot or WiFi reconnect by a lamp
+#               that was synced before, after a random 20-30 min, so a site-wide
+#               power outage does not cause a request storm and other network
+#               devices can boot first. Also sent about 5 s after a WiFi cycle.
+#               Config rarely changes, so the lag is acceptable.
+#   Both are answered the same way, except for the suspect delay below.
+#
+# ANSWERING
+#   A lamp answers with all parameters, after a random 0-500 ms delay, but only
+#   when the device has group_synced status. An unsynced lamp stays quiet.
+#   A sync_is_suspect lamp answers only after 1 minute extra, and drops its answer
+#   if any other lamps answered meanwhile. This is so a isolated workbench lamp cannot
+#   overwrite the group when it is brought to the field. It still answers a REQCONFIG
+#   at once, as that is a deliberate operator action. This means that adding a 2nd
+#   lamp to a new group is not annoyingly slow for the operator
+#
+# BECOMING SYNCED
+#   - All 9 parameters have been seen since last wifi reconnect, from any mix of
+#     lamps. Allowing a mix of lamps reduces the issue with UDP drops.
+#   - If 10 s after our own request nothing from our group arrived and we never seen
+#     any peers, we are alone, so we are synced.
+#   - If any packet arrived, we have peers, so only the full set makes us synced.
+#     So a new lamp or a lamp in a new group declares itself synced after about 10 s
+#   - A lamp that has seen peers but not all 9 parameters repeats REQCONFIG
+#     every 5 min until it has them. The mask is kept between retries.
+#
+# ORDER OF SENDING ALL CONFIG (aka, THE DUMP)
+#   LAMP first, the two USE_ switches last. A received USE_SUN or USE_SCHEDULE
+#   starts eval_quiet, which waits 500 ms and then evaluates the cycle once,
+#   so the switches mark the end of the series. The minute tick corrects it
+#   anyway if a switch is lost.
+#   MOTION and SENSOR are not in the dump. They are state, and the expiry heals a
+#   lamp that missed one.
+
 
 substitutions:
   devicename: outdoor-lamp
   description: Outdoor lamp controller.
-  prj_version: "2026.10.23.6"
+  prj_version: "2026.10.28"
 
   # Pins
   # Relay boards often are active low, if so set inverted: true on the relay
-  # Defaults are for a Classic Shelly1 which I use at all of these lantarns
+  # Defaults are for a classic Shelly1 which I use on almost all of these lantarns
   # Warning to self: Dont use as is for the newer Shellys
-  GPIO_Status_LED: GPIO2    # onboard LED of most ESP12F modules, active low
-  GPIO_relay:      GPIO5    # onboard relay on my ESP12F based custom PCB's
-  GPIO_wall_input: GPIO13   # first 230V input on my ESP12F based custom PCB's
+
+  # values for Shelly-1, based on ESP8266 with 2MB 
+  # take note of the platform overrides below. If you change the board, it needs review
+  use_board:       esp01_1m  # works for Shelly1 (2M)
+  real_board:      Shelly1   # string in HA
+  GPIO_relay:      GPIO4     # shelly-1 inverted
+  GPIO_wall_input: GPIO5     # shelly-1 no_pullup not inverted 
+  GPIO_Status_LED: GPIO2     # shelly-1 does not have, pick any
+
+  # values for my custom ESP12F board, use same as shelly1, so we can use same partition layout
+  # take note of the platform overrides below. If you change the board, it needs review
+#  use_board:       esp01_1m  # works for ESP12F even though it is 4M
+#  real_board:      ESP12F    # string in HA
+#  GPIO_relay:      GPIO4     # 
+#  GPIO_wall_input: GPIO5     # 
+#  GPIO_Status_LED: GPIO2     # esp12f build in
 
   # Defaults of the runtime settings, used until the user changes them
   # for twilight calculations, 1 digit is enough, lets not burden user unput
@@ -177,7 +253,7 @@ substitutions:
   default_group:     "outdoor"
 
   # UDP group transport. All lamps need the same addresses and port.
-  # Every packet goes to both addresses.
+  # Every packet goes to both addresses (stale, multi is now ignored).
   udp_broadcast: 255.255.255.255
   udp_multicast: 239.0.60.53
   udp_port: "18511"
@@ -189,10 +265,9 @@ esphome:
   comment: ${description} v${prj_version}
   friendly_name: ${devicename}
   name_add_mac_suffix: true  
-  # A text sensor can be edited to hold the user-mnemonic for the actual device
-  # The advise is to rename in HA device into the same
-  # example: Devicename: outdoor-lamp-feabce
-  #          Friendlyname: Chalet36
+  project:
+    name: "${real_board}.${devicename}"
+    version: "${prj_version}"
   on_boot:
     priority: -100
     then:
@@ -200,13 +275,23 @@ esphome:
       # after boot is done, they are processed
       - lambda: 'id(boot_done) = true;'
       - script.execute: lamp_update
+  # Override to 2MB for the classic Shelly1, also fine on the ESP12F
+  platformio_options:
+    board_upload.flash_size: 2MB
+    board_build.ldscript: eagle.flash.2m64.ld
 
 esp8266:
-  board: esp12e
+  board: ${use_board}
   restore_from_flash: true
 
 logger:
-  level: INFO
+  level: DEBUG
+  initial_level: INFO
+  logs:
+    status_led: NONE
+
+#debug:
+#  update_interval: 10s
 
 api:
   # This device works without HA, and we avoid reboots so we do not loose time
@@ -225,6 +310,7 @@ wifi:
   # However prolonged lack of time sync will cycle the wifi module
   # and 7 days no time sync will finally do a reboot
   reboot_timeout: 0s
+  power_save_mode: none
   on_connect:
     # Uncompleted experiment to update the DHCP/DNS hostname
 #   - script.execute: hostname_apply
@@ -243,7 +329,9 @@ captive_portal:
 web_server:
   port: 80
   version: 3
-  local: true
+#  I used to think I liked local, but the 100K javascript being served makes the device laggy
+#  over a group of devices on the edge of an overreaching wifi. 
+#  local: true
 
 #######################################################################################
 
@@ -251,17 +339,20 @@ web_server:
 udp:
   id: lamp_udp
   port: ${udp_port}
-  listen_address: ${udp_multicast}
+#  listen_address: ${udp_multicast}
   # udp.write sends to every address in this list: each packet goes out twice
+  # I seem to not be able to make multicast work stable in any meaningful way. 
   addresses:
     - ${udp_broadcast}
-    - ${udp_multicast}
+#    - ${udp_multicast}
   on_receive:
     then:
       - lambda: |-
+      
           std::string s(data.begin(), data.end());
           const std::string magic = "LAMPGROUP:";
           std::string group = id(device_group).state;
+          ESP_LOGD("udp", "in: %s", s.c_str());
           if (group.empty() || s.compare(0, magic.size(), magic) != 0) {
             return;
           }
@@ -277,13 +368,41 @@ udp:
               p_end == std::string::npos ? std::string::npos : p_end - g_end - 1);
           std::string v = (p_end == std::string::npos) ? "" : s.substr(p_end + 1);
 
-          if (param == "REQUESTCONFIG") {
-            // Not our own request coming back as an echo
+          if (param == "REQCONFIG" || param == "RECONNECT") {
+            // For 2 seconds, ignore as likely our own request coming back as an echo
             if (!(id(req_sent) && millis() - id(last_req_ms) < 2000)) {
-              id(group_dump).execute();
+              if (!id(group_peers).state) id(group_peers).turn_on();
+              if (id(group_synced).state) {
+                // Only a suspect lamp answers a RECONNECT slowly
+                id(dump_slow) = (param == "RECONNECT") && id(sync_is_suspect);
+                id(group_dump).execute();
+              }
             }
             return;
           }
+          // Any other packet from our group proves a peer exists
+          if (!id(group_peers).state) id(group_peers).turn_on();
+          // Others are answering: a pending slow dump of ours is not needed
+          if (id(sync_is_suspect) && id(group_dump).is_running()) id(group_dump).stop();
+
+          // All 9 parameters seen since the reconnect, from any mix of lamps
+          static const char *names[] = {"LAMP", "TWILIGHT", "LOC_LAT", "LOC_LON", "TZ_TEXT",
+                                        "SCHEDULE_ON", "SCHEDULE_OFF", "USE_SUN", "USE_SCHEDULE"};
+          for (int i = 0; i < 9; i++) {
+            if (param == names[i]) {
+              id(rx_mask) |= (1u << i);
+              break;
+            }
+          }
+          if (id(rx_mask) == 0x1FF) {
+            id(rx_mask) = 0;
+            id(sync_is_suspect) = false;
+            id(group_synced).turn_on();
+            id(group_live) = true;
+            id(group_request).stop();
+            ESP_LOGD("udp", "in: all parameters seen");
+          }
+
 
           // Apply, but do not send it on again, and do not evaluate the
           // cycle on half a config (cfg_hold).
@@ -291,11 +410,12 @@ udp:
           id(cfg_hold) = true;
           if (param == "LAMP") {
             bool on = (v == "1");
-            if (on != id(lamp_output).current_values.is_on()) {
+            //if (on != id(lamp_output).current_values.is_on()) {
+            if (on != id(lamp_output).remote_values.is_on()) {
               if (on) {
-                id(lamp_output).turn_on();
+                id(lamp_output).turn_on().perform();
               } else {
-                id(lamp_output).turn_off();
+                id(lamp_output).turn_off().perform();
               }
             }
           } else if (param == "USE_SCHEDULE") {
@@ -335,6 +455,18 @@ udp:
             if (!v.empty() && id(tz_text).state != v) {
               id(tz_text).make_call().set_value(v).perform();
             }
+          } else if (param == "MOTION") {
+            bool on = (v == "1");
+            id(motion_rx_ms) = on ? millis() : 0;
+            if (on != id(motion_act).state) {
+              if (on) id(motion_act).turn_on(); else id(motion_act).turn_off();
+            }
+          } else if (param == "SENSOR") {
+            bool on = (v == "1");
+            id(sensor_rx_ms) = on ? millis() : 0;
+            if (on != id(sensor_act).state) {
+              if (on) id(sensor_act).turn_on(); else id(sensor_act).turn_off();
+            }
           } else if (param == "SCHEDULE_ON" || param == "SCHEDULE_OFF") {
             int h = 0, m = 0, sec = 0;
             if (sscanf(v.c_str(), "%d:%d:%d", &h, &m, &sec) == 3 &&
@@ -354,7 +486,7 @@ udp:
           id(tx_mute) = false;
           // The switches come last in a series. Evaluate once, shortly after
           // the last packet, without broadcasting.
-          if (param == "USE_SCHEDULE" || param == "USE_SUN") {
+          if (param == "USE_SCHEDULE" || param == "USE_SUN" || param == "MOTION" || param == "SENSOR") {
             id(eval_quiet).execute();
           }
 
@@ -367,7 +499,7 @@ time:
   - platform: homeassistant
     id: ha_time
     on_time_sync:
-      - lambda: 'id(unsynced_h) = 0;'
+      - lambda: 'id(unsynced_hours) = 0;'
       - script.execute: lamp_update
 
   - platform: sntp
@@ -379,7 +511,7 @@ time:
     servers:
       - 0.pool.ntp.org
     on_time_sync:
-      - lambda: 'id(unsynced_h) = 0;'
+      - lambda: 'id(unsynced_hours) = 0;'
       - script.execute: lamp_update
 
 # Sun position and sunrise/sunset, calculated locally.
@@ -423,7 +555,7 @@ globals:
   - id: group_live
     type: bool
     initial_value: 'false'
-  # Time of our own last REQUESTCONFIG, to ignore its echo
+  # Time of our own last REQCONFIG, to ignore its echo
   - id: req_sent
     type: bool
     initial_value: 'false'
@@ -435,9 +567,49 @@ globals:
   - id: udp_queue
     type: std::vector<std::string>
   # Hours since the last time sync (NTP or HA), counted by the hourly interval
-  - id: unsynced_h
+  - id: unsynced_hours
     type: int
     initial_value: '0'
+    
+  # We keep track if we received all config parameters over the network
+  # Keep a bitmask field which parameters have been received
+  - id: rx_mask
+    type: uint32_t
+    initial_value: '0'
+  # A manual group change does an immediate requestconfig  
+  - id: req_fast
+    type: bool
+    initial_value: 'false'
+  # Evaluated at boot: remembers synced but never saw peers. A lone device that may have moved.
+  - id: sync_is_suspect
+    type: bool
+    initial_value: 'false'
+  # Set per received request: answer slowly (suspect lamp, RECONNECT)
+  - id: dump_slow
+    type: bool
+    initial_value: 'false'
+  # WiFi cycle: RECONNECT after a short wait for DHCP
+  - id: req_after_cycle
+    type: bool
+    initial_value: 'false'
+  # Kind of request being sent: true = REQCONFIG, false = RECONNECT
+  - id: req_is_request
+    type: bool
+    initial_value: 'false'
+
+  # The lamp was last driven by MOTION or SENSOR (not by the cycle)
+  - id: ms_driven
+    type: bool
+    initial_value: 'false'
+  # millis() of a received MOTION/SENSOR on. 0 = off, or driven locally.
+  # A received one expires after 10 min unless refreshed.
+  - id: motion_rx_ms
+    type: uint32_t
+    initial_value: '0'
+  - id: sensor_rx_ms
+    type: uint32_t
+    initial_value: '0'
+
 
 output:
   - platform: gpio
@@ -509,13 +681,11 @@ switch:
     optimistic: true
     restore_mode: RESTORE_DEFAULT_ON
     on_turn_on:
-      - script.execute: swap_times
       - script.execute: lamp_update
       - script.execute:
           id: group_send
           param: "USE_SUN"
     on_turn_off:
-      - script.execute: swap_times
       - script.execute: lamp_update
       - script.execute:
           id: group_send
@@ -523,8 +693,52 @@ switch:
     web_server:
       sorting_weight: 202
 
+  - platform: template
+    name: "Motion"
+    id: motion_act
+    icon: mdi:motion-sensor
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    disabled_by_default: true
+    on_turn_on:
+      - lambda: 'if (!id(tx_mute)) id(motion_rx_ms) = 0;'
+      - script.execute: lamp_update
+      - script.execute:
+          id: group_send
+          param: "MOTION"
+    on_turn_off:
+      - lambda: 'if (!id(tx_mute)) id(motion_rx_ms) = 0;'
+      - script.execute: lamp_update
+      - script.execute:
+          id: group_send
+          param: "MOTION"
+    web_server:
+      sorting_weight: 141
+
+  - platform: template
+    name: "Sensor"
+    id: sensor_act
+    icon: mdi:weather-night
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    disabled_by_default: true
+    on_turn_on:
+      - lambda: 'if (!id(tx_mute)) id(sensor_rx_ms) = 0;'
+      - script.execute: lamp_update
+      - script.execute:
+          id: group_send
+          param: "SENSOR"
+    on_turn_off:
+      - lambda: 'if (!id(tx_mute)) id(sensor_rx_ms) = 0;'
+      - script.execute: lamp_update
+      - script.execute:
+          id: group_send
+          param: "SENSOR"
+    web_server:
+      sorting_weight: 142
+
+
   # Use wall switch as daylight sensor. See the header.
-  # Whether the input is a state, or an edge switch See the header.
   - platform: template
     name: "Use daylight sensor"
     id: use_sensor
@@ -533,16 +747,76 @@ switch:
     optimistic: true
     restore_mode: RESTORE_DEFAULT_OFF
     on_turn_on:
-      - script.execute: lamp_update
+      - switch.turn_off: use_motion
+      - if:
+          condition:
+            binary_sensor.is_on: wall_switch
+          then:
+            - switch.turn_on: sensor_act
     on_turn_off:
-      - script.execute: lamp_update
+      - switch.turn_off: sensor_act
     web_server:
-      sorting_weight: 204
+      sorting_weight: 253
+
+  # Use wall switch as motion sensor. See the header.
+  - platform: template
+    name: "Use motion sensor"
+    id: use_motion
+    icon: mdi:motion-sensor
+    entity_category: config
+    disabled_by_default: true
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - switch.turn_off: use_sensor
+      - if:
+          condition:
+            binary_sensor.is_on: wall_switch
+          then:
+            - switch.turn_on: motion_act
+    on_turn_off:
+      - switch.turn_off: motion_act
+    web_server:
+      sorting_weight: 254
+
+
+  # Remembered. "My config is current, I may answer." Cleared by a user group change.
+  - platform: template
+    name: "_Group synced"
+    id: group_synced
+    entity_category: diagnostic
+    disabled_by_default: true
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+  # Remembered. "I have seen another lamp in my group." Cleared by a user group change.
+  - platform: template
+    name: "_Group has peers"
+    id: group_peers
+    entity_category: diagnostic
+    disabled_by_default: true
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    
+  # Dynamic activation of debug messages
+  - platform: template
+    name: "_Debug log"
+    id: debug_log
+    entity_category: diagnostic
+    disabled_by_default: true
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - logger.set_level:
+          level: DEBUG
+    on_turn_off:
+      - logger.set_level:
+          level: INFO
+
 
 binary_sensor:
-  # Wall switch: every press toggles the lamp, whatever its state.
-  # The cycle is edge based, so this never disrupts it. The lamp change
-  # is broadcast like any other.
+  # Wall switch. Either a state based SENSOR or MOTION device or a edge based
+  # hotel or hallway switch
   - platform: gpio
     pin:
       number: ${GPIO_wall_input}
@@ -558,15 +832,34 @@ binary_sensor:
           condition:
             switch.is_on: use_sensor
           then:
-            - script.execute: lamp_update
+            - if:
+                condition:
+                  binary_sensor.is_on: wall_switch
+                then:
+                  - switch.turn_on: sensor_act
+                else:
+                  - switch.turn_off: sensor_act
           else:
             - if:
                 condition:
-                  # Skip the first published state after boot, so the switch's
-                  # position at power-up does not toggle the lamp.
-                  lambda: 'static bool seen = false; if (!seen) { seen = true; return false; } return true;'
+                  switch.is_on: use_motion
                 then:
-                  - light.toggle: lamp_output
+                  - if:
+                      condition:
+                        binary_sensor.is_on: wall_switch
+                      then:
+                        - switch.turn_on: motion_act
+                      else:
+                        - switch.turn_off: motion_act
+                else:
+                  - if:
+                      condition:
+                        # Skip the first published state after boot, so the switch's
+                        # position at power-up does not toggle the lamp.
+                        lambda: 'static bool seen = false; if (!seen) { seen = true; return false; } return true;'
+                      then:
+                        - light.toggle: lamp_output
+
 
 select:
   # What counts as sun up / down
@@ -634,7 +927,7 @@ number:
     mode: box
     unit_of_measurement: "°"
     web_server:
-      sorting_weight: 250
+      sorting_weight: 241
     on_value:
       then:
         - script.execute: lamp_update
@@ -678,6 +971,7 @@ text:
               id(device_label).publish_state(h);   // force the clean text to the front end
             }
 
+
   # Name of the lamp group. Not broadcast: it selects the group. A new
   # name asks that group for its config.
   - platform: template
@@ -695,11 +989,21 @@ text:
       sorting_weight: 120
     on_value:
       then:
-        - script.execute: group_request
-    
+        - if:
+            condition:
+              lambda: 'return id(boot_done);'
+            then:
+              - switch.turn_off: group_synced
+              - switch.turn_off: group_peers
+              - lambda: |-
+                  id(sync_is_suspect) = false;
+                  id(req_fast) = true;
+              - script.execute: group_request
+
+
   # POSIX timezone string, see the header
   - platform: template
-    name: "Timezone"
+    name: "Location Timezone"
     id: tz_text
     icon: mdi:map-clock
     mode: text
@@ -711,7 +1015,7 @@ text:
     min_length: 1
     max_length: 64
     web_server:
-      sorting_weight: 260
+      sorting_weight: 242
     on_value:
       then:
         - script.execute: lamp_update
@@ -773,7 +1077,7 @@ script:
           id(lamp_target) = -1;   // unknown until proven otherwise
 
           // If we are in the midle of a multi-step config change:
-          // like a UDP receive or a time swap, skip this lamp_update:
+          // like a UDP receive skip this lamp_update:
           if (id(cfg_hold)) {
             return;
           }
@@ -797,29 +1101,47 @@ script:
             lvl = 0;
           }
 
+
+
+
+
           auto t = id(ha_time).now();
           bool sun = id(use_sun).state;
           bool scd = id(use_schedule).state;
-          bool sns = id(use_sensor).state;
+          bool sns = id(sensor_act).state;   // SENSOR action
+          bool mot = id(motion_act).state;   // MOTION action
+          const double thr = elevations[lvl];
           char buf[48];
 
-          // All off; the cycle does nothing. Forget the applied state, so the:
-          // next one counts as a first state and is not broadcast:
-          if (!sun && !scd && !sns)  {
-            id(lamp_applied) = -1;
-            snprintf(buf, sizeof(buf), "Manual switch only");
+          // MOTION: on while the sun is below the level. Overrides the pause.
+          // Works without a clock: a missing clock must not disable a safety light.
+          if (mot && (!t.is_valid() || id(sun_sun).elevation() < thr)) {
+            id(ms_driven) = true;
+            id(lamp_target) = 1;
+            snprintf(buf, sizeof(buf), "Motion");
             id(lamp_info).publish_state(buf);
             return;
           }
 
-          // Sensor only; classic outdoor light sensor is broadcasted:
-          if (!sun && !scd && sns) {
-            // Sensor only: the lamp follows the sensor, broadcast as LAMP
-            id(lamp_target) = id(wall_switch).state ? 1 : 0;
-            snprintf(buf, sizeof(buf), "Broadcast daylight sensor");
+          // Neither sun nor schedule: only SENSOR, MOTION or the manual switch.
+          // Needs no clock.
+          if (!sun && !scd) {
+            if (sns) {
+              id(ms_driven) = true;
+              id(lamp_target) = 1;
+              snprintf(buf, sizeof(buf), "Daylight sensor");
+            } else if (id(ms_driven)) {
+              id(ms_driven) = false;     // released: back to off
+              id(lamp_target) = 0;
+              snprintf(buf, sizeof(buf), "Manual switch only");
+            } else {
+              id(lamp_applied) = -1;     // forget, next one is a first state
+              snprintf(buf, sizeof(buf), "Manual switch only");
+            }
             id(lamp_info).publish_state(buf);
             return;
           }
+          id(ms_driven) = false;
 
           // No valid clock; the cycle does nothing. Forget the applied state, so the:
           // next one counts as a first state and is not broadcast:
@@ -849,8 +1171,7 @@ script:
           if (sun) {
             // Decision by elevation: continuous, no date rollover jump.
             // Wall_switch: when use_sensor this will widen light on period
-            const double thr = elevations[lvl];
-            bool dark  = id(sun_sun).elevation() < thr || (sns && id(wall_switch).state);
+            bool dark  = id(sun_sun).elevation() < thr || sns;
             bool pause = in_window(m, off, on, 1440);   // off..on, sun + times
             id(lamp_target) = (dark && !(scd && pause)) ? 1 : 0;
 
@@ -886,8 +1207,8 @@ script:
             if (scd) {
               // no Sun & Schedule: on from schedule_on to schedule_off, any length
               // Schedule only: the entire night, any length
-              // Wall_switch: when use_sensor this will widen light on period
-              id(lamp_target) = (in_window(m, on, off, 1440) || (sns && id(wall_switch).state)) ? 1 : 0;
+              // Wall_switch: when SENSOR this will widen light on period
+              id(lamp_target) = (in_window(m, on, off, 1440) || sns) ? 1 : 0;
               snprintf(buf, sizeof(buf), "%02d:%02d-%02d:%02d",
                        id(schedule_on).hour, id(schedule_on).minute,
                        id(schedule_off).hour, id(schedule_off).minute);
@@ -900,7 +1221,7 @@ script:
             lambda: 'return id(lamp_target) >= 0 && id(lamp_target) != id(lamp_applied);'
           then:
             # The first apply after boot / enable is not broadcast. If the
-            # group has another state, its answer to REQUESTCONFIG wins.
+            # group has another state, its answer to REQCONFIG wins.
             - lambda: 'id(quiet_apply) = (id(lamp_applied) < 0);'
             - if:
                 condition:
@@ -912,23 +1233,6 @@ script:
             - lambda: |-
                 id(quiet_apply) = false;
                 id(lamp_applied) = id(lamp_target);
-
-  # Swap schedule_on and schedule_off, when Use sun is switched by a person.
-  # Not at boot (restore), and not from the group (it sends the times).
-  # cfg_hold keeps lamp_update from seeing the half swapped times.
-  - id: swap_times
-    then:
-      - if:
-          condition:
-            lambda: 'return id(boot_done) && !id(tx_mute);'
-          then:
-            - lambda: |-
-                int on_h = id(schedule_on).hour,  on_m = id(schedule_on).minute,  on_s = id(schedule_on).second;
-                int off_h = id(schedule_off).hour, off_m = id(schedule_off).minute, off_s = id(schedule_off).second;
-                id(cfg_hold) = true;
-                id(schedule_on).make_call().set_time(off_h, off_m, off_s).perform();
-                id(schedule_off).make_call().set_time(on_h, on_m, on_s).perform();
-                id(cfg_hold) = false;
 
   # After a received USE_SUN / USE_SCHEDULE: let the rest of the series arrive,
   # then evaluate the cycle once, without broadcasting.
@@ -971,7 +1275,8 @@ script:
                 std::string v;
                 char b[24];
                 if (param == "LAMP") {
-                  v = id(lamp_output).current_values.is_on() ? "1" : "0";
+                  // v = id(lamp_output).current_values.is_on() ? "1" : "0";
+                  v = id(lamp_output).remote_values.is_on() ? "1" : "0";
                 } else if (param == "USE_SCHEDULE") {
                   v = id(use_schedule).state ? "1" : "0";
                 } else if (param == "USE_SUN") {
@@ -994,7 +1299,13 @@ script:
                   snprintf(b, sizeof(b), "%02d:%02d:%02d",
                            id(schedule_off).hour, id(schedule_off).minute, id(schedule_off).second);
                   v = b;
+                } else if (param == "MOTION") {
+                  v = id(motion_act).state ? "1" : "0";
+                } else if (param == "SENSOR") {
+                  v = id(sensor_act).state ? "1" : "0";
                 }
+
+
                 std::string pre = "LAMPGROUP:" + id(device_group).state + ":" + param + ":";
                 // Only the latest value of a parameter matters: replace a queued one
                 for (auto &q : id(udp_queue)) {
@@ -1013,32 +1324,99 @@ script:
                 then:
                   - script.execute: group_flush
 
-  # Ask the group for its config. On WiFi connect and on group change.
-  # The short wait lets the network come up. From here on changes are sent.
+
+  # Ask the group for its config. Immediate on user change or with never valid config.
+  # With staggered long delay on reboots with prior valid config to avoid network storm
+  # after a full power outage. This also  allows the network to come up first
   - id: group_request
     mode: restart
     then:
-      - delay: 3s
       - lambda: |-
           id(group_live) = true;
+          id(rx_mask) = 0;
+      - delay: !lambda |-
+          if (id(req_fast)) {
+            // User group change: network is up, ask immediate, as a REQCONFIG
+            id(req_fast) = false;
+            id(req_is_request) = true;
+            return (uint32_t) 0;    // No wait
+          }
+          if (!id(group_synced).state) {
+            // Never synced (new device or new group): ask soon, as a REQCONFIG
+            id(req_after_cycle) = false;
+            id(req_is_request) = true;
+            return (uint32_t) 5000; // Allow DHCP time to finish
+          }
+          id(req_is_request) = false;
+          if (id(req_after_cycle)) {
+            // WiFi reconnect cycle: ask soon, as a RECONNECT
+            id(req_after_cycle) = false;
+            return (uint32_t) 5000; // Allow DHCP time to finish
+          }
+          // Boot / reconnect: background stagger in 20 to 30 min
+          return (uint32_t) (1200000 + random_uint32() % 600000);
+      - lambda: |-
           id(req_sent) = true;
           id(last_req_ms) = millis();
       - if:
           condition:
             lambda: 'return !id(device_group).state.empty();'
           then:
+            - logger.log:
+                format: "out: LAMPGROUP:%s:%s"
+                args: ['id(device_group).state.c_str()', 'id(req_is_request) ? "REQCONFIG" : "RECONNECT"']
+                level: DEBUG
+                tag: udp
             - udp.write:
                 id: lamp_udp
                 data: !lambda |-
-                  std::string s = "LAMPGROUP:" + id(device_group).state + ":REQUESTCONFIG";
+                  std::string s = "LAMPGROUP:" + id(device_group).state + (id(req_is_request) ? ":REQCONFIG" : ":RECONNECT");
+                  return std::vector<uint8_t>(s.begin(), s.end());
+            - delay: 50ms
+            - udp.write:
+                id: lamp_udp
+                data: !lambda |-
+                  std::string s = "LAMPGROUP:" + id(device_group).state + (id(req_is_request) ? ":REQCONFIG" : ":RECONNECT");
+                  return std::vector<uint8_t>(s.begin(), s.end());
+      - delay: 10s
+      # Nothing from our group arrived: we are alone, so we are synced.
+      - if:
+          condition:
+            lambda: 'return !id(group_peers).state;'
+          then:
+            - lambda: 'id(sync_is_suspect) = false;'
+            - switch.turn_on: group_synced
+      # Peers were seen (not alone) but no full set yet: keep asking, mask is kept.
+      - while:
+          condition:
+            lambda: 'return !id(group_synced).state && !id(device_group).state.empty();'
+          then:
+            - delay: 5min
+            - lambda: 'id(req_is_request) = true;'
+            - logger.log:
+                format: "out: LAMPGROUP:%s:REQCONFIG (retry)"
+                args: ['id(device_group).state.c_str()']
+                level: DEBUG
+                tag: udp
+            - udp.write:
+                id: lamp_udp
+                data: !lambda |-
+                  std::string s = "LAMPGROUP:" + id(device_group).state + ":REQCONFIG";
+                  return std::vector<uint8_t>(s.begin(), s.end());
+            - delay: 50ms
+            - udp.write:
+                id: lamp_udp
+                data: !lambda |-
+                  std::string s = "LAMPGROUP:" + id(device_group).state + ":REQCONFIG";
                   return std::vector<uint8_t>(s.begin(), s.end());
 
-  # Answer a REQUESTCONFIG: send everything, spread in time so the answers of
+
+  # Answer a REQCONFIG: send everything, spread in time so the answers of
   # several lamps do not all arrive at once.
   - id: group_dump
     mode: restart
     then:
-      - delay: !lambda 'return random_uint32() % 500;'
+      - delay: !lambda 'return (uint32_t) ((id(dump_slow) ? 60000 : 0) + random_uint32() % 500);'
       - script.execute:
           id: group_send
           param: "LAMP"
@@ -1076,7 +1454,7 @@ script:
           param: "USE_SCHEDULE"
 
   # Send the queued packets one by one, 20 ms apart, so a burst of changes
-  # (use_sun + time swap) does not exhaust the network buffers.
+  # does not exhaust the network buffers.
   - id: group_flush
     mode: single
     then:
@@ -1084,6 +1462,18 @@ script:
           condition:
             lambda: 'return !id(udp_queue).empty();'
           then:
+            - logger.log:
+                format: "out: %s"
+                args: ['id(udp_queue).front().c_str()']
+                level: DEBUG
+                tag: udp
+            - udp.write:
+                id: lamp_udp
+                data: !lambda |-
+                  std::string s = id(udp_queue).front();
+                  return std::vector<uint8_t>(s.begin(), s.end());
+            # sending it twice to counter lossy UDP
+            - delay: 50ms
             - udp.write:
                 id: lamp_udp
                 data: !lambda |-
@@ -1099,8 +1489,8 @@ script:
     then:
       - wifi.disable:
       - delay: 10min
+      - lambda: 'id(req_after_cycle) = true;'
       - wifi.enable:
-
 
 #  # Hostname from the label, applied after ESPHome's own apply at connect.
 #  - id: hostname_apply
@@ -1138,28 +1528,78 @@ interval:
   # Every minute re-evaluate the cycle
   - interval: 1min
     then:
+      # Every minute: a received MOTION/SENSOR expires after 10 min without refresh
+      - lambda: |-
+          id(tx_mute) = true;
+          if (id(motion_rx_ms) && millis() - id(motion_rx_ms) > 600000) {
+            id(motion_rx_ms) = 0;
+            id(motion_act).turn_off();
+          }
+          if (id(sensor_rx_ms) && millis() - id(sensor_rx_ms) > 600000) {
+            id(sensor_rx_ms) = 0;
+            id(sensor_act).turn_off();
+          }
+          id(tx_mute) = false;
       - script.execute: lamp_update
 
-  # Every hour: count hours without a time sync.
-  # Every 6 hours without time sync: cycle WiFi. After 7 days without: reboot.
+
+  # Every 5 min: the lamp that originated MOTION/SENSOR repeats it, plus LAMP
+  - interval: 5min
+    then:
+      - if:
+          condition:
+            lambda: 'return (id(motion_act).state && id(motion_rx_ms) == 0) || (id(sensor_act).state && id(sensor_rx_ms) == 0);'
+          then:
+            - script.execute:
+                id: group_send
+                param: "LAMP"
+            - if:
+                #if MOTION originated here, then resend it every 5 minutes
+                condition:
+                  lambda: 'return id(motion_act).state && id(motion_rx_ms) == 0;'
+                then:
+                  - script.execute:
+                      id: group_send
+                      param: "MOTION"
+            - if:
+                #if SENSOR originated here, then resend it every 5 minutes
+                condition:
+                  lambda: 'return id(sensor_act).state && id(sensor_rx_ms) == 0;'
+                then:
+                  - script.execute:
+                      id: group_send
+                      param: "SENSOR"
+
+
+  # Every hour: count hours without a time sync, and act on it.
+  # We have valid clock, then cycle wifi, reboot after 7 days
+  # we have no valid clock, but do need one, reboot after 6 hours
   - interval: 1h
     then:
-      - lambda: 'id(unsynced_h)++;'
-      - if:
-          condition:
-            lambda: 'return id(unsynced_h) >= 168;'
-          then:
-            - lambda: 'App.safe_reboot();'
-      - if:
-          condition:
-            lambda: 'return id(unsynced_h) % 6 == 0;'
-          then:
-            - if:
-                condition:
-                  not:
-                    script.is_running: wifi_cycle
-                then:
-                  - script.execute: wifi_cycle
+      - lambda: |-
+
+          // count the hours, the count is reset by time sync:
+          id(unsynced_hours)++;
+          int h = id(unsynced_hours);
+
+          // Only act every 6 hours:
+          if (h % 6 != 0 && h < 168) {
+            return;
+          }
+
+          bool clock_valid = id(ha_time).now().is_valid();
+          bool needs_clock = id(use_sun).state || id(use_schedule).state;
+
+          // Last resort: 7 days without a sync, or already no clock
+          if (h >= 168 || (!clock_valid && needs_clock)) {
+            App.safe_reboot();
+            return;
+          }
+
+          // Otherwise cycle the WiFi:
+          if (!id(wifi_cycle).is_running()) {
+            id(wifi_cycle).execute();
+          }
 
 
 button:
@@ -1186,8 +1626,24 @@ sensor:
     disabled_by_default: true
     entity_category: diagnostic
 
+  # Talk about unneeded diagnostics
+  # I wish these could be hidden_by_default
+#  - platform: debug
+#    free:
+#      name: "_Heap free"
+#    loop_time:
+#      name: "_Loop time"
 
 text_sensor:
+  # Calculated lamp times of today
+  - platform: template
+    name: "Lamp Schedule"
+    id: lamp_info
+    icon: mdi:lightbulb-auto-outline
+    update_interval: never
+    web_server:
+      sorting_weight: 131
+
   # Calculated sun times of today
   - platform: template
     name: "Twilight Info"
@@ -1196,16 +1652,8 @@ text_sensor:
     update_interval: never
     disabled_by_default: true
     web_server:
-      sorting_weight: 210
+      sorting_weight: 132
 
-  # Calculated lamp times of today
-  - platform: template
-    name: "Lamp Schedule"
-    id: lamp_info
-    icon: mdi:lightbulb-auto-outline
-    update_interval: never
-    web_server:
-      sorting_weight: 130
 
   - platform: wifi_info
     ip_address:
@@ -1224,5 +1672,13 @@ text_sensor:
     disabled_by_default: true
     entity_category: diagnostic
 
+  # Talk about unneeded diagnostics
+  # actually, with time came multiple hardware devices
+  # figuring out what device we are looking at
+  # I wish these could be hidden_by_default
+#  - platform: debug
+#    internal: true
+#    device:
+#      name: "_Debug device hidden"
 
 # END OF CONFIGURATION   name: outdoor-lamp.yaml
