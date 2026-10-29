@@ -192,6 +192,7 @@
 # PACKETS
 #   REQCONFIG   "Send me your config." Sent at once after a user changes the GROUP,
 #               and about 5 s after connecting when we were never before synced.
+#               or our sync is suspect.
 #   RECONNECT   "I just (re)connected." Sent after boot or WiFi reconnect by a lamp
 #               that was synced before, but after a random 20-30 minute delay, so a site-wide
 #               power outage does not cause a request storm and also other network
@@ -216,7 +217,7 @@
 #   - If 10 s after our own REQCONFIG nothing from our group arrived and we never seen
 #     any peers, we are alone, so we declare ourselves synced.
 #   - If any packet arrived, we have peers, so only the full set will make us synced.
-#   - A lamp that has seen peers but not all 9 parameters repeats REQCONFIG
+#   - A lamp that requested config but never seen all 9 parameters repeats the request
 #     every 5 min until it has all of them.
 #
 # ORDER OF SENDING ALL CONFIG (aka, THE DUMP)
@@ -286,6 +287,7 @@ esphome:
   on_boot:
     priority: -100
     then:
+      - lambda: 'id(sync_is_suspect) = !id(group_peers).state && id(group_synced).state;'
       - lambda: 'id(boot_done) = true;'
       - script.execute: lamp_update
   # Override to 2MB for the classic Shelly1, also fine on the ESP12F
@@ -1366,13 +1368,14 @@ script:
           id(rx_mask) = 0;
       - delay: !lambda |-
           if (id(req_fast)) {
-            // User group change: network is up, ask immediate, as a REQCONFIG
+            // User did a group change: network is up, ask immediate, as a REQCONFIG
             id(req_fast) = false;
             id(req_is_request) = true;
             return (uint32_t) 0;    // No wait
           }
-          if (!id(group_synced).state) {
+          if (!id(group_synced).state || id(sync_is_suspect)) {
             // Never synced (new device or new group): ask soon, as a REQCONFIG
+            // or a former or real lone device : ask soon, as a REQCONFIG
             id(req_after_cycle) = false;
             id(req_is_request) = true;
             return (uint32_t) 5000; // Allow DHCP time to finish
@@ -1382,7 +1385,7 @@ script:
             // WiFi reconnect cycle: ask soon, as a RECONNECT
             id(req_after_cycle) = false;
             return (uint32_t) 5000; // Allow DHCP time to finish
-          }
+          } 
           // Boot / reconnect: background stagger in 20 to 30 min
           return (uint32_t) (1200000 + random_uint32() % 600000);
       - lambda: |-
@@ -1409,20 +1412,23 @@ script:
                   std::string s = "LAMPGROUP:" + id(device_group).state + (id(req_is_request) ? ":REQCONFIG" : ":RECONNECT");
                   return std::vector<uint8_t>(s.begin(), s.end());
       - delay: 10s
-      # Nothing from our group arrived: we are alone, so we are synced.
+      # Nothing from our group arrived: we are alone, so we assume we are synced.
       - if:
           condition:
             lambda: 'return !id(group_peers).state;'
           then:
-            - lambda: 'id(sync_is_suspect) = false;'
+            - lambda: 'id(sync_is_suspect) = true;'
             - switch.turn_on: group_synced
-      # Peers were seen (not alone) but no full set yet: keep asking, mask is kept.
+      # No full set yet: keep asking, mask is kept.
       - while:
           condition:
-            lambda: 'return id(group_peers).state && !id(device_group).state.empty();'
+            lambda: 'return !id(device_group).state.empty();'
           then:
             - delay: 5min
-            - lambda: 'id(req_is_request) = true;'
+            - lambda: |-
+                id(req_is_request) = true;
+                id(req_sent) = true;
+                id(last_req_ms) = millis();
             - logger.log:
                 format: "out: LAMPGROUP:%s:REQCONFIG (retry)"
                 args: ['id(device_group).state.c_str()']
