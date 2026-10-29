@@ -19,6 +19,9 @@ and show up in Home Assistant. Change a setting on one lamp and the whole group 
 the group, and the others follow virtually instantly so they visually appear as a single wired lamp chain. A lamp rebooting or reconnecting asks
 the group what is going on in case it missed any configuration updates. 
 
+It also works far up north, where sunset is sometimes part midnight, and evening twilight merges into morning twilight. It should even work
+above the polar cicle, but that has only been tested in lab conditions. 
+
 ### Main controlling modes
 
 | Switch | The lamp is driven by |
@@ -108,7 +111,7 @@ All parameters are used and shared among the group, regardless if they are enabl
 
 ### Setting up location and time
 
-Latitude and Longitude as one decimal values, good enough for sun calculations.
+Latitude and Longitude as one decimal values, good enough for sun calculations.<br>
 The timezone is a POSIX string, not a name. Examples:
 
 | Place | Timezone text |
@@ -135,8 +138,6 @@ but the wall switch and any hardware sensors keep working
 | Off | Off | On | Lamp follows the sensor |
 | Off | Off | Off | No cycle, manual only |
 
-Times may be past midnight. Schedule off at 00:30 is fine, and so is a schedule that runs from 23:30 to 03:00.
-
 **The schedule is simple on purpose.** One pair of times, every day. No weekends, no late Saturdays.
 
 **Sun levels.**
@@ -147,7 +148,8 @@ Times may be past midnight. Schedule off at 00:30 is fine, and so is a schedule 
 | Half Civil | -3 degrees, adds about 15 minutes of daylight|
 | Civil | -6 degrees, adds about 30 minutes |
 
-Check the actual info text for actual times, as the "about 15 minutes" is in moderate conditions. But far up north near midsummer can add infinite time (sun never sets or rises)
+Check the actual info text for actual times, as the above "about 15 minutes" is in moderate conditions. But far up north near
+midsummer can add larger periods, even infinite time (sun never sets or rises)
 
 ### Wall switch and sensors
 
