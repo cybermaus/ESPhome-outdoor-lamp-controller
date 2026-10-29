@@ -14,7 +14,8 @@ It works **without central control** or even somewhat without stable network. It
 Each lamp calculates its own cycle. For the rest there is no reliance on connectivity, internet service, or any central controller like Home Assistant.
 If WiFi, Home Assistant or the router goes away, the lamps keep switching on their own clock.
 
-Yet despite not relying on centralized control, **multiple devices still work as one.** Lamps that share a group name configure and switch together,
+### Yet despite not relying on centralized control, multiple devices still work as one.
+Lamps that share a group name configure and switch together,
 and show up in Home Assistant. Change a setting on one lamp and the whole group is updated. Whichever lamp reaches a switching moment first drives
 the group, and the others follow virtually instantly so they visually appear as a single wired lamp chain. A lamp rebooting or reconnecting asks
 the group what is going on in case it missed any configuration updates. 
@@ -45,7 +46,7 @@ until sunup. A short, efficient lamp cycle that still lights the dark hours you 
 - **Sensor on top of any of these**: a dark, overcast sky can turn the lamp on early or keep it on later.
 - **Sensor only**: the lamp simply follows the sensor, and shares that with the group, only one need a sensor, and they all switch as one.
 - **None**: the lamp only follows the wall switch (or Home Assistant) and drives the group to all switch as one.
-- **Motion**: while someone is detected and it is dark, the lamp is on, even in the dead of night.
+- **Motion**: when motion is detected and it is dark, the lamp is on, even in the dead of night.
 
 **Twilight level.** The Twilight level can be set: Normal (the official sunrise
 and sunset), Half Civil, or Civil twilight (the lamp stays on longer).
@@ -69,7 +70,7 @@ Any manually switched state stays until the next sun or schedule cycle update.
 2. Check the pins in the `substitutions` block against your board.
 3. Compile and Flash it.
 4. Optionally, adopt it in Home Assistant, and set the Device label and rename HA Friendly name to the same.<br>
-   Even if you adopt in HA, it may be easiest to configure using the device Web UI
+   Even if you adopt in HA, it may be easier to configure using the device Web UI
 5. Set your location, timezone, and choose your cycle drivers.
 6. For several lamps: give them the same Device Group. They find each other and update each other
 
@@ -106,7 +107,7 @@ values in the substitutions at the top of the code.
 | Connect motion sensor | Switch input is a motion sensor instead of a wall switch |
 
 Most configuration entities are disabled by default in Home Assistant. Enable the ones you need, however it
-may be easiest to simply configure from the Device Web UI
+may be easier to leave them disabled and perform configuration on the Device Web UI. 
 All parameters are used and shared among the group, regardless if they are enabled in HA or not. 
 
 ### Setting up location and time
