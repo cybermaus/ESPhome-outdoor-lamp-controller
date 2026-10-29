@@ -238,7 +238,7 @@ substitutions:
   # Defaults are for a classic Shelly1 which I use on almost all of these lantarns
   # Warning to self: Dont use as is for the newer Shellys
 
-  # values for Shelly-1, based on ESP8266 with 2MB 
+  # values for Shelly-1, a ESP8266 with 2MB 
   # take note of the platform overrides below. If you change the board, it needs review
   use_board:       esp01_1m  # works for Shelly1 but override to 2M
   show_board:      Shelly1   # string shown in HA
@@ -1419,7 +1419,7 @@ script:
       # Peers were seen (not alone) but no full set yet: keep asking, mask is kept.
       - while:
           condition:
-            lambda: 'return !id(group_synced).state && !id(device_group).state.empty();'
+            lambda: 'return id(group_peers).state && !id(device_group).state.empty();'
           then:
             - delay: 5min
             - lambda: 'id(req_is_request) = true;'
