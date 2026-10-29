@@ -54,8 +54,8 @@ and sunset), Half Civil, or Civil twilight (the lamp stays on longer).
 The lamp follows the actual position of the sun.
 
 **Optional wall switch.** Can be a wall switch, a daylight sensor, or a motion sensor. As wall switch, input acts a hotel or hallway
-switch setup: every flip of toggles the lamp, and the whole group follows. Multiple locations can hold a wall switch switch.
-Any manually switched state stays until the next sun or schedule update. 
+switch setup: every flip of any switch toggles the lamp and the whole group follows. Multiple locations can hold a wall switch.
+Any manually switched state stays until the next sun or schedule cycle update. 
 
 **Feedback info** Two text sensors show the next sun up and sun down, and the resulting lamp switch schedule.
 
