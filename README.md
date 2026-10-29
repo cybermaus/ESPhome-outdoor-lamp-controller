@@ -193,24 +193,24 @@ only one device so they will all respond.
 | Problem | Check |
 |---|---|
 | The lamp never follows the cycle | Lamp Schedule says "No valid clock": check WiFi, NTP and Home Assistant time |
-| Lamp Schedule says "Manual switch only" | Use sun, Use schedule are off |
+| Lamp Schedule says "Manual switch only" | Use sun and Use schedule are both off |
 | Switching at the wrong time of day | Timezone text, latitude and longitude |
-| Lamps do not follow each other | Same group name, same UDP port and addresses, network allows broadcast, router client isolation |
-| New lamp does not get the group settings | It asks again when WiFi reconnects, or when you change its group name |
+| Lamps do not follow each other | Same group name, same UDP port, network allows broadcast, router client isolation |
+| New lamp does not get the group settings | Under some conditions, like after a suspected power failure, it waits 20 to 40 minutes to allow the rest of the network to come back. You can force it by changing the group name to a temporary name and back. |
 | Lamp is on when the cycle says off | A manual or group change lasts until the cycle next changes state |
-| Wall switch does nothing | Use daylight sensor is on, so the input is read as a sensor |
+| Wall switch does nothing | Connect daylight sensor is on, so the input is read as a daylight sensor |
 | Device lost from the network | See reboot/recover section below |
 
 ### Reboot and recovery
 
 Because the clock is so important, unlike normal ESPHome, it does not reboot when it looses connectivity. If you simply wait for it to come back, you may wait a long time. But it does reboot... eventually
 
-If there is a valid clock, it does not reboot for 7 days! However if does did not see any HA or NTP time sync, it will restart WiFi every 6 hours with a 10 minute pause.
+If there is a valid clock, it does not reboot for 7 days! However if does not see any HA or NTP time sync, it will restart WiFi every 6 hours with a 10 minute pause.
 Eventually after 7 days without time sync, it gives up and reboots. Which means it looses the clock. Hopefully the full stack reset will unstuck something and it finally reconnects.
 
-If there is no valid clock, *and* it needs one (if would not need one if only a wall switch is configured), it will reboot every 6 hours
+If there is *no* valid clock, *but* it needs one (if would not need one if only a wall switch input is configured), it will reboot every 6 hours
 
-Basically this means you may need to wait 7 days unless if you manually power cycle. It also means that if the WiFi access point itself fails, this device will continue to work for 7 days, but then it will reboot, loose time, and still not find the AP. If you do not want that, remove the 7 day reboot from the code, it will restart WiFi every 6 hours forever.
+Basically this means you may need to wait 7 days unless if you manually power cycle. It also means that if the WiFi access point itself fails, this device will continue to work for 7 days, but then it will reboot, loose time, and still not find the AP. If you do not want that, remove the 7 day reboot from the compiled code, it may take months before the clock drifts significantly, and in the mean time it will keep to the schedule.
 
 If it does finally reboot, maybe triggered by a manual power cycle, it will start a recovery access point, as is normal for ESPhome.
 
