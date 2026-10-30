@@ -288,7 +288,6 @@ esphome:
     priority: -100
     then:
       - lambda: 'id(sync_is_suspect) = !id(group_peers).state && id(group_synced).state;'
-      - lambda: 'id(boot_done) = true;'
       - script.execute: lamp_update
   # Override to 2MB for the classic Shelly1, also fine on the ESP12F
   platformio_options:
@@ -585,11 +584,6 @@ globals:
   - id: cfg_hold
     type: bool
     initial_value: 'false'
-  # False while the restored values are put back at boot
-  # (may not be needed. no on_value runs by the boot based initiation)
-  - id: boot_done
-    type: bool
-    initial_value: 'false'
   # False until WiFi is up and the group was asked for its config.
   # Stops the restored values at boot from being broadcast.
   - id: group_live
@@ -633,7 +627,7 @@ globals:
     type: bool
     initial_value: 'false'
   # Kind of request being sent: true = REQCONFIG, false = RECONNECT
-  - id: req_is_request
+  - id: send_reqconfig
     type: bool
     initial_value: 'false'
 
@@ -1013,17 +1007,12 @@ text:
       sorting_weight: 120
     on_value:
       then:
-        - if:
-            condition:
-              lambda: 'return id(boot_done);'
-            then:
-              - switch.turn_off: group_synced
-              - switch.turn_off: group_peers
-              - lambda: |-
-                  id(sync_is_suspect) = false;
-                  id(req_fast) = true;
-              - script.execute: group_request
-
+        - switch.turn_off: group_synced
+        - switch.turn_off: group_peers
+        - lambda: |-
+            id(sync_is_suspect) = false;
+            id(req_fast) = true;
+        - script.execute: group_request
 
   # POSIX timezone string, see the header
   - platform: template
@@ -1373,17 +1362,17 @@ script:
           if (id(req_fast)) {
             // User did a group change: network is up, ask immediate, as a REQCONFIG
             id(req_fast) = false;
-            id(req_is_request) = true;
+            id(send_reqconfig) = true;
             return (uint32_t) 0;    // No wait
           }
           if (!id(group_synced).state || id(sync_is_suspect)) {
             // Never synced (new device or new group): ask soon, as a REQCONFIG
             // or a former or real lone device : ask soon, as a REQCONFIG
             id(req_after_cycle) = false;
-            id(req_is_request) = true;
+            id(send_reqconfig) = true;
             return (uint32_t) 5000; // Allow DHCP time to finish
           }
-          id(req_is_request) = false;
+          id(send_reqconfig) = false;
           if (id(req_after_cycle)) {
             // WiFi reconnect cycle: ask soon, as a RECONNECT
             id(req_after_cycle) = false;
@@ -1400,19 +1389,19 @@ script:
           then:
             - logger.log:
                 format: "out: LAMPGROUP:%s:%s"
-                args: ['id(device_group).state.c_str()', 'id(req_is_request) ? "REQCONFIG" : "RECONNECT"']
+                args: ['id(device_group).state.c_str()', 'id(send_reqconfig) ? "REQCONFIG" : "RECONNECT"']
                 level: DEBUG
                 tag: udp
             - udp.write:
                 id: lamp_udp
                 data: !lambda |-
-                  std::string s = "LAMPGROUP:" + id(device_group).state + (id(req_is_request) ? ":REQCONFIG" : ":RECONNECT");
+                  std::string s = "LAMPGROUP:" + id(device_group).state + (id(send_reqconfig) ? ":REQCONFIG" : ":RECONNECT");
                   return std::vector<uint8_t>(s.begin(), s.end());
             - delay: 50ms
             - udp.write:
                 id: lamp_udp
                 data: !lambda |-
-                  std::string s = "LAMPGROUP:" + id(device_group).state + (id(req_is_request) ? ":REQCONFIG" : ":RECONNECT");
+                  std::string s = "LAMPGROUP:" + id(device_group).state + (id(send_reqconfig) ? ":REQCONFIG" : ":RECONNECT");
                   return std::vector<uint8_t>(s.begin(), s.end());
       - delay: 10s
       # Nothing from our group arrived: we are alone, so we assume we are synced.
@@ -1431,7 +1420,7 @@ script:
             - delay: 5min
             # grab timestamp to ignore echo's
             - lambda: |-
-                id(req_is_request) = true;
+                id(send_reqconfig) = true;
                 id(req_sent) = true;
                 id(last_req_ms) = millis();
             - logger.log:
