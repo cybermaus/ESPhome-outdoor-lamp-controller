@@ -80,8 +80,8 @@
 # CLOCK: Without a valid clock the sun and schedule cycle can do nothing. The wall
 # switch, SENSOR and MOTION keep working, as a missing clock must not disable a light.
 # Time is taken from HA (if available) or NTP 
-# -with- a valid clock, reboots are avoided, instead prolonged loss of time sync will
-# cycle the WiFi module daily at 13h00. After 30 days we give in and reboot
+# -with- a valid clock and fresh clock resync; reboots are avoided
+# -with- a valid clock but a stale clock resync; reboots after 30 days
 # -without- a valid clock but -with- a cycle that needs one, we reboot after only 6 hours.
 #
 # LABEL: This is a user mnemonic label, so they know which device. Chalet14 or Lamp03
@@ -196,7 +196,7 @@
 #   RECONNECT   "I just (re)connected." Sent after boot or WiFi reconnect by a lamp
 #               that was synced before, but after a random 20-30 minute delay, so a site-wide
 #               power outage does not cause a request storm and also other network
-#               infrastructure can boot first. Also sent about 5s after a local WiFi cycle.
+#               infrastructure can boot first.
 #               As config rarely changes, working with 20-30 minute stale config is
 #               acceptable as long as it is not send out.
 #   Both are answered with a staggered but fast configuration dump by all synced devices
@@ -232,7 +232,7 @@
 substitutions:
   devicename: outdoor-lamp
   description: Outdoor lamp controller.
-  prj_version: "2026.10.29"
+  prj_version: "2026.10.30"
 
   # Pins
   # Relay boards often are active low, if so set inverted: true on the relay
@@ -309,7 +309,6 @@ logger:
 
 api:
   # This device works without HA, and we avoid reboots so we do not loose time
-  # However prolonged lack of time sync will cycle the wifi module
   reboot_timeout: 0s
 
 ota:
@@ -320,7 +319,6 @@ wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
   # This device works without HA, and we avoid reboots so we do not loose valid time
-  # A separate wifi restart and reboot loop exists elsewhere
   reboot_timeout: 0s
   # The UDP reception stability does not like this optimization
   # A separate wifi restart loop exists elsewhere
@@ -1502,7 +1500,7 @@ script:
             - delay: 20ms
 
 
-  # Daily WiFi refresh at 13:00, while the air is busy and the lamps are likely dormand
+  # Daily WiFi refresh at 13:00, while the air is busy and the lamps are likely dormant
   # Random wait of 0-5 min spreads the lamps to avoid network storm
   - id: wifi_cycle
     mode: single
@@ -1604,7 +1602,7 @@ interval:
 
 
   # Every hour: count hours without a time sync, and act on it.
-  # We have valid clock, then cycle wifi, reboot after 30 days
+  # We have valid clock, reboot after 30 days
   # we have no valid clock, but do need one, reboot after 6 hours
   - interval: 1h
     then:
