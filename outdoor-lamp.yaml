@@ -321,11 +321,14 @@ ota:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
-  # This device works without HA, and we avoid reboots so we do not loose time
-  # However prolonged lack of time sync will cycle the wifi module
-  # and 7 days no time sync will finally do a reboot
+  # This device works without HA, and we avoid reboots so we do not loose valid time
+  # A separate wifi restart and reboot loop exists elsewhere
   reboot_timeout: 0s
+  # The UDP reception stability does not like this optimization
+  # A separate wifi restart loop exists elsewhere
   power_save_mode: none
+  fast_connect: false
+  post_connect_roaming: false
   on_connect:
     # Uncompleted experiment to update the DHCP/DNS hostname
 #   - script.execute: hostname_apply
@@ -1419,12 +1422,14 @@ script:
           then:
             - lambda: 'id(sync_is_suspect) = true;'
             - switch.turn_on: group_synced
-      # No full set yet: keep asking, mask is kept.
+      # No full set yet: so we keep asking in a while loop
+      # note the while is infinite, but the UDP receive simply cancels this script to end
       - while:
           condition:
             lambda: 'return !id(device_group).state.empty();'
           then:
             - delay: 5min
+            # grab timestamp to ignore echo's
             - lambda: |-
                 id(req_is_request) = true;
                 id(req_sent) = true;
