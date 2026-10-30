@@ -539,10 +539,16 @@ time:
     on_time_sync:
       - lambda: 'id(unsynced_hours) = 0;'
       - script.execute: lamp_update
-
   - platform: sntp
     id: ntp_time
     timezone: ${default_timezone}
+    # Daily WiFi refresh at 13:00, see wifi_cycle
+    on_time:
+      - seconds: 0
+        minutes: 0
+        hours: 13
+        then:
+          - script.execute: wifi_cycle
     # Start values only.
     # When WiFi connects, net_setup adds the DHCP gateway
     # as server 1 and the pool server becomes server 2.
@@ -617,10 +623,6 @@ globals:
     initial_value: 'false'
   # Set per received request: answer slowly (suspect lamp, RECONNECT)
   - id: dump_slow
-    type: bool
-    initial_value: 'false'
-  # WiFi cycle: RECONNECT after a short wait for DHCP
-  - id: req_after_cycle
     type: bool
     initial_value: 'false'
   # Kind of request being sent: true = REQCONFIG, false = RECONNECT
@@ -1365,16 +1367,10 @@ script:
           if (!id(group_synced).state || id(sync_is_suspect)) {
             // Never synced (new device or new group): ask soon, as a REQCONFIG
             // or a former or real lone device : ask soon, as a REQCONFIG
-            id(req_after_cycle) = false;
             id(send_reqconfig) = true;
             return (uint32_t) 5000; // Allow DHCP time to finish
           }
           id(send_reqconfig) = false;
-          if (id(req_after_cycle)) {
-            // WiFi reconnect cycle: ask soon, as a RECONNECT
-            id(req_after_cycle) = false;
-            return (uint32_t) 5000; // Allow DHCP time to finish
-          } 
           // Boot / reconnect: background stagger in 20 to 30 min
           return (uint32_t) (1200000 + random_uint32() % 600000);
       - lambda: 'id(last_req_ms) = millis();'
@@ -1506,15 +1502,17 @@ script:
             - lambda: 'id(udp_queue).erase(id(udp_queue).begin());'
             - delay: 20ms
 
-  # When we get no time-sync for a prolonged time, we will cycle the WiFi
-  # we prefer that over a full reboot, as a reboot would loose the clock completely.
+
+  # Daily WiFi refresh at 13:00, while the air is busy and the lamps are likely dormand
+  # Random wait of 0-5 min spreads the lamps to avoid network storm
   - id: wifi_cycle
     mode: single
     then:
+      - delay: !lambda 'return random_uint32() % 300000;'
       - wifi.disable:
-      - delay: 10min
-      - lambda: 'id(req_after_cycle) = true;'
+      - delay: 10s
       - wifi.enable:
+
 
   # Blanking out TZ will put back compile defaults for TZ and location
   # Not only for my own easy, but also it gives the user an example TZ
