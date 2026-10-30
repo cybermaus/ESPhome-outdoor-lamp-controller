@@ -91,9 +91,10 @@
 # GROUP: All devices have a groupname, and all in the same GROUP sync themselves.
 # They sync lamp state and config over UDP with plain text packet.
 #
-#   LAMPGROUP:<group>:<PARAMETER>:<value>
-#   LAMPGROUP:<group>:REQCONFIG
-#   LAMPGROUP:<group>:RECONNECT
+#   LAMPGROUP:<group>:<PARAMETER>:<value>;
+#   LAMPGROUP:<group>:<PARAMETER>:<value>;....<PARAMETER>:<value>;COMPLETE;
+#   LAMPGROUP:<group>:REQCONFIG;
+#   LAMPGROUP:<group>:RECONNECT;
 #
 # The group name can not contain a colon. The value is everything after the
 # third colon (times have colons). The parameter is the uppercase ID of the
@@ -207,26 +208,17 @@
 #   A sync_is_suspect lamp answers only after 1 minute extra, and drops its answer
 #   if any other lamps answer first. This is so an isolated workbench lamp cannot poison
 #   the group with stale config when it is brought back into the field. The suspect lamp
-#   still answers a REQCONFIG immediately, as that is a deliberate operator action.
+#   still answers a REQCONFIG immediately, as that the result of a operator action.
 #   This means that adding a 2nd lamp to an otherwise empty group is not annoyingly
 #   slow for the operator
 #
 # BECOMING SYNCED
-#   - When all 9 parameters have been seen since last wifi reconnect, from any mix of
-#     lamps. Allowing a mix of lamps reduces the issue with UDP drops.
+#   - When a COMPLETE packet was seen.
 #   - If 10 s after our own REQCONFIG nothing from our group arrived and we never seen
-#     any peers, we are alone, so we declare ourselves synced.
+#     any peers, we are alone, so we declare ourselves synced, but suspect
 #   - If any packet arrived, we have peers, so only the full set will make us synced.
-#   - A lamp that requested config but never seen all 9 parameters repeats the request
-#     every 5 min until it has all of them.
+#   - A lamp that requested config but did not get a COMPLETE packet, it repeats the request
 #
-# ORDER OF SENDING ALL CONFIG (aka, THE DUMP)
-#   LAMP first, the two USE_ switches last. A received USE_SUN or USE_SCHEDULE
-#   starts eval_quiet, which waits 500 ms and then evaluates the cycle once,
-#   so the switches mark the end of the series. The minute tick corrects it
-#   anyway if a switch is lost.
-#   MOTION and SENSOR are not in the dump. They are state, and the expiry heals a
-#   lamp that missed one.
 
 
 substitutions:
@@ -273,6 +265,7 @@ substitutions:
   udp_broadcast: 255.255.255.255
   udp_multicast: 239.0.60.53
   udp_port: "18511"
+  udp_retry: 100ms
 
 #######################################################################################
 
@@ -371,18 +364,18 @@ udp:
             return;
           }
 
-          // LAMPGROUP:<group>:<param>[:<value>]
+          // LAMPGROUP:<group>:<param>[:<value>]; :
           size_t g_end = s.find(':', magic.size());
           if (g_end == std::string::npos ||
               s.substr(magic.size(), g_end - magic.size()) != group) {
             return;                               // other group
           }
-          // g = groupname; p = parameter; v = value :
-          // Probably want to rename these, so the code below reads better to humans :
-          size_t p_end = s.find(':', g_end + 1);
-          std::string param = s.substr(g_end + 1,
-              p_end == std::string::npos ? std::string::npos : p_end - g_end - 1);
-          std::string v = (p_end == std::string::npos) ? "" : s.substr(p_end + 1);
+
+          // Everything after the group is a series of items, each ended by ';':
+          //   NAME;   or   NAME:value;   Only ended items count, a cut packet is ignored.
+          std::string body = s.substr(g_end + 1);
+          std::string param = (body == "REQCONFIG;" || body == "RECONNECT;")
+                              ? body.substr(0, body.size() - 1) : "";
 
           if (param == "REQCONFIG" || param == "RECONNECT") {
             // For 2 seconds, ignore as likely our own request coming back as an echo :
@@ -403,31 +396,17 @@ udp:
           // Others are answering: Device is not alone and a pending slow dump is not needed 
           if (id(sync_is_suspect) && id(group_dump).is_running()) id(group_dump).stop();
 
-          // All 9 parameters seen since the reconnect, from any mix of lamps :
-          static const char *names[] = {"LAMP", "TWILIGHT", "LOC_LAT", "LOC_LON", "TZ_TEXT",
-                                        "SCHEDULE_ON", "SCHEDULE_OFF", "USE_SUN", "USE_SCHEDULE"};
-          for (int i = 0; i < 9; i++) {
-            if (param == names[i]) {
-              id(rx_mask) |= (1u << i);
-              break;
-            }
-          }
-          // Yes, we got all 9 parameters :
-          if (id(rx_mask) == 0x1FF) {
-            id(rx_mask) = 0;
-            id(sync_is_suspect) = false;
-            id(group_synced).turn_on();
-            id(group_live) = true;
-            id(group_request).stop();
-            ESP_LOGD("udp", "in: all parameters seen");
-          }
 
+          // Apply one NAME / value pair. The caller below sets tx_mute (not sent on again) :
+          // and cfg_hold (no cycle evaluation on half a config) :
+          bool eval = false;
+          bool complete = false;
 
-          // Apply, but do not send it on again, and do not evaluate the
-          // cycle on half a config (cfg_hold).
-          id(tx_mute) = true;
-          id(cfg_hold) = true;
-          
+          // Defining a apply() internal lambda function     :
+          // wrong idents to keep github change lines low       :
+          // a later change may rename v to value and fix ident :
+          auto apply = [&](const std::string &param, const std::string &v) {
+
           if (param == "LAMP") {
             bool on = (v == "1");
             //if (on != id(lamp_output).current_values.is_on()) {
@@ -516,12 +495,46 @@ udp:
               }
             }
           }
-          
+
+
+          // Any of these parameters, when received, trigger a lamp_update reevaluation :
+          if (param == "USE_SCHEDULE" || param == "USE_SUN" || param == "MOTION" || param == "SENSOR") {
+            eval = true;
+          }
+          };
+
+
+          // The actual reading loop, above was the apply() lambda definition. :
+          id(tx_mute) = true;
+          id(cfg_hold) = true;
+          size_t pos = 0;
+          size_t semi;
+          while ((semi = body.find(';', pos)) != std::string::npos) {
+            std::string item = body.substr(pos, semi - pos);
+            pos = semi + 1;
+            if (item == "COMPLETE") {
+              complete = true;
+              continue;
+            }
+            size_t colon = item.find(':');
+            if (colon != std::string::npos) {
+              apply(item.substr(0, colon), item.substr(colon + 1));
+            }
+          }
           id(cfg_hold) = false;
           id(tx_mute) = false;
-          // The switches come last in a series. Evaluate once, shortly after
-          // the last packet, without broadcasting.
-          if (param == "USE_SCHEDULE" || param == "USE_SUN" || param == "MOTION" || param == "SENSOR") {
+
+          // COMPLETE; ends a full config dump: we have the full set
+          if (complete) {
+            id(sync_is_suspect) = false;
+            id(group_synced).turn_on();
+            id(group_live) = true;
+            id(group_request).stop();
+            ESP_LOGD("udp", "in: COMPLETE set seen");
+          }
+
+          // Evaluate once, shortly after the last item, without broadcasting :
+          if (eval) {
             id(eval_quiet).execute();
           }
 
@@ -575,12 +588,8 @@ globals:
   - id: lamp_applied
     type: int
     initial_value: '-1'
-  # True while a change must not be broadcast (a received one)
+  # True while a change must not be broadcast (a received one, or the first apply after boot)
   - id: tx_mute
-    type: bool
-    initial_value: 'false'
-  # True during the first apply after boot / enable: not broadcast either
-  - id: quiet_apply
     type: bool
     initial_value: 'false'
   # True while a config is half changed: lamp_update does nothing
@@ -605,11 +614,6 @@ globals:
     type: int
     initial_value: '0'
     
-  # We keep track if we received all config parameters over the network
-  # Keep a bitmask field which parameters have been received
-  - id: rx_mask
-    type: uint32_t
-    initial_value: '0'
   # A manual group change does an immediate requestconfig  
   - id: req_fast
     type: bool
@@ -1136,9 +1140,9 @@ script:
           }
 
 
-          auto t = id(ha_time).now();
-          ESP_LOGD("sun", "time=%s valid=%d TZ='%s' lat=%.1f lon=%.1f", t.strftime("%Y-%m-%d %H:%M:%S %z").c_str(),
-            t.is_valid(), id(tz_text).state.c_str(), id(loc_lat).state, id(loc_lon).state);
+          auto time = id(ha_time).now();
+          //ESP_LOGD("sun", "time=%s valid=%d TZ='%s' lat=%.1f lon=%.1f", t.strftime("%Y-%m-%d %H:%M:%S %z").c_str(),
+          //  id(ha_time).now().is_valid(), id(tz_text).state.c_str(), id(loc_lat).state, id(loc_lon).state);
 
           bool sun = id(use_sun).state;
           bool scd = id(use_schedule).state;
@@ -1149,7 +1153,7 @@ script:
 
           // MOTION: on while the sun is below the level. Overrides the pause.
           // Works without a clock: a missing clock must not disable a safety light.
-          if (mot && (!t.is_valid() || id(sun_sun).elevation() < thr)) {
+          if (mot && (!time.is_valid() || id(sun_sun).elevation() < thr)) {
             id(ms_driven) = true;
             id(lamp_target) = 1;
             snprintf(buf, sizeof(buf), "Motion detected");
@@ -1179,7 +1183,7 @@ script:
 
           // No valid clock; the cycle does nothing. Forget the applied state, so the:
           // next one counts as a first state and is not broadcast:
-          if (!t.is_valid()) {
+          if (!time.is_valid()) {
             id(lamp_applied) = -1;
             snprintf(buf, sizeof(buf), "No valid clock, manual only");
             id(lamp_info).publish_state(buf);
@@ -1187,7 +1191,7 @@ script:
           }
 
           // Sun and/or Schedule active and a valid time: process the cycle
-          int m   = t.hour * 60 + t.minute;
+          int m   = time.hour * 60 + time.minute;
           int on  = id(schedule_on).hour  * 60 + id(schedule_on).minute;
           int off = id(schedule_off).hour * 60 + id(schedule_off).minute;
 
@@ -1256,17 +1260,17 @@ script:
           then:
             # The first apply after boot / enable is not broadcast. If the
             # group has another state, its answer to REQCONFIG wins.
-            - lambda: 'id(quiet_apply) = (id(lamp_applied) < 0);'
-            - if:
-                condition:
-                  lambda: 'return id(lamp_target) == 1;'
-                then:
-                  - light.turn_on: lamp_output
-                else:
-                  - light.turn_off: lamp_output
             - lambda: |-
-                id(quiet_apply) = false;
+                bool tx_mute_saved_state = id(tx_mute);
+                if (id(lamp_applied) < 0) id(tx_mute) = true;
+                if (id(lamp_target) == 1) {
+                  id(lamp_output).turn_on().perform();
+                } else {
+                  id(lamp_output).turn_off().perform();
+                }
                 id(lamp_applied) = id(lamp_target);
+                id(tx_mute) = tx_mute_saved_state;
+
 
   # After a received USE_SUN / USE_SCHEDULE: let the rest of the series arrive,
   # then evaluate the cycle once, without broadcasting.
@@ -1303,11 +1307,17 @@ script:
     then:
       - if:
           condition:
-            lambda: 'return id(group_live) && !id(tx_mute) && !id(quiet_apply) && !id(device_group).state.empty();'
+            lambda: 'return id(group_live) && !id(tx_mute) && !id(device_group).state.empty();'
           then:
             - lambda: |-
+
+                // Defining a value_of() internal lambda function     :
+                // wrong idents to keep github change lines low       :
+                // a later change may rename v to value and fix ident :
+                auto value_of = [&](const std::string &param) -> std::string {
                 std::string v;
                 char b[24];
+
                 if (param == "LAMP") {
                   // v = id(lamp_output).current_values.is_on() ? "1" : "0";
                   v = id(lamp_output).remote_values.is_on() ? "1" : "0";
@@ -1338,19 +1348,39 @@ script:
                 } else if (param == "SENSOR") {
                   v = id(sensor_act).state ? "1" : "0";
                 }
+                return v;
+                };
 
 
-                std::string pre = "LAMPGROUP:" + id(device_group).state + ":" + param + ":";
-                // Only the latest value of a parameter matters: replace a queued one
-                for (auto &q : id(udp_queue)) {
-                  if (q.compare(0, pre.size(), pre) == 0) {
-                    q = pre + v;
-                    return;
+                std::string pre = "LAMPGROUP:" + id(device_group).state + ":";
+                std::string msg;
+                if (param == "DUMP") {
+                  // All 9 config parameters in one packet, COMPLETE; marks it as a full set :
+                  static const char *names[] = {"LAMP", "TWILIGHT", "LOC_LAT", "LOC_LON", "TZ_TEXT",
+                                                "SCHEDULE_ON", "SCHEDULE_OFF", "USE_SUN", "USE_SCHEDULE"};
+                  for (int i = 0; i < 9; i++) {
+                    msg += names[i];
+                    msg += ":";
+                    msg += value_of(names[i]);
+                    msg += ";";
+                  }
+                  msg += "COMPLETE;";
+                } else {
+                  msg = param + ":" + value_of(param) + ";";
+
+                  // Only the latest value of a parameter matters: replace a queued single item
+                  std::string key = pre + param + ":";
+                  for (auto &q : id(udp_queue)) {
+                    if (q.compare(0, key.size(), key) == 0 && q.find(';') == q.size() - 1) {
+                      q = pre + msg;
+                      return;
+                    }
                   }
                 }
                 if (id(udp_queue).size() < 24) {
-                  id(udp_queue).push_back(pre + v);
+                  id(udp_queue).push_back(pre + msg);
                 }
+
             - if:
                 condition:
                   not:
@@ -1365,9 +1395,7 @@ script:
   - id: group_request
     mode: restart
     then:
-      - lambda: |-
-          id(group_live) = true;
-          id(rx_mask) = 0;
+      - lambda: 'id(group_live) = true;'
       - delay: !lambda |-
           if (id(req_fast)) {
             // User did a group change: network is up, ask immediate, as a REQCONFIG
@@ -1399,13 +1427,13 @@ script:
             - udp.write:
                 id: lamp_udp
                 data: !lambda |-
-                  std::string s = "LAMPGROUP:" + id(device_group).state + (id(send_reqconfig) ? ":REQCONFIG" : ":RECONNECT");
+                  std::string s = "LAMPGROUP:" + id(device_group).state + (id(send_reqconfig) ? ":REQCONFIG;" : ":RECONNECT;");
                   return std::vector<uint8_t>(s.begin(), s.end());
-            - delay: 50ms
+            - delay: ${udp_retry}
             - udp.write:
                 id: lamp_udp
                 data: !lambda |-
-                  std::string s = "LAMPGROUP:" + id(device_group).state + (id(send_reqconfig) ? ":REQCONFIG" : ":RECONNECT");
+                  std::string s = "LAMPGROUP:" + id(device_group).state + (id(send_reqconfig) ? ":REQCONFIG;" : ":RECONNECT;");
                   return std::vector<uint8_t>(s.begin(), s.end());
       - delay: 10s
       # Nothing from our group arrived: we are alone, so we assume we are synced.
@@ -1427,64 +1455,32 @@ script:
                 id(send_reqconfig) = true;
                 id(last_req_ms) = millis();
             - logger.log:
-                format: "out: LAMPGROUP:%s:REQCONFIG (retry)"
+                format: "out: LAMPGROUP:%sREQCONFIG (retry)"
                 args: ['id(device_group).state.c_str()']
                 level: DEBUG
                 tag: udp
             - udp.write:
                 id: lamp_udp
                 data: !lambda |-
-                  std::string s = "LAMPGROUP:" + id(device_group).state + ":REQCONFIG";
+                  std::string s = "LAMPGROUP:" + id(device_group).state + ":REQCONFIG;";
                   return std::vector<uint8_t>(s.begin(), s.end());
-            - delay: 50ms
+            - delay: ${udp_retry}
             - udp.write:
                 id: lamp_udp
                 data: !lambda |-
-                  std::string s = "LAMPGROUP:" + id(device_group).state + ":REQCONFIG";
+                  std::string s = "LAMPGROUP:" + id(device_group).state + ":REQCONFIG;";
                   return std::vector<uint8_t>(s.begin(), s.end());
 
 
-  # Answer a REQCONFIG: send everything, spread in time so the answers of
-  # several lamps do not all arrive at once.
+  # Answer a REQCONFIG or RECONNECT send everything as s single packet
   - id: group_dump
     mode: restart
     then:
       - delay: !lambda 'return (uint32_t) ((id(dump_slow) ? 60000 : 0) + random_uint32() % 500);'
       - script.execute:
           id: group_send
-          param: "LAMP"
-      - delay: 50ms
-      - script.execute:
-          id: group_send
-          param: "TWILIGHT"
-      - delay: 50ms
-      - script.execute:
-          id: group_send
-          param: "LOC_LAT"
-      - delay: 50ms
-      - script.execute:
-          id: group_send
-          param: "LOC_LON"
-      - delay: 50ms
-      - script.execute:
-          id: group_send
-          param: "TZ_TEXT"
-      - delay: 50ms
-      - script.execute:
-          id: group_send
-          param: "SCHEDULE_ON"
-      - delay: 50ms
-      - script.execute:
-          id: group_send
-          param: "SCHEDULE_OFF"
-      - delay: 50ms
-      - script.execute:
-          id: group_send
-          param: "USE_SUN"
-      - delay: 50ms
-      - script.execute:
-          id: group_send
-          param: "USE_SCHEDULE"
+          param: "DUMP"
+
 
   # Send the queued packets one by one, 20 ms apart, so a burst of changes
   # does not exhaust the network buffers.
@@ -1506,7 +1502,7 @@ script:
                   std::string s = id(udp_queue).front();
                   return std::vector<uint8_t>(s.begin(), s.end());
             # sending it twice to counter lossy UDP
-            - delay: 50ms
+            - delay: ${udp_retry}
             - udp.write:
                 id: lamp_udp
                 data: !lambda |-
@@ -1574,14 +1570,21 @@ interval:
   # Every minute re-evaluate the cycle
   - interval: 1min
     then:
+      # minute ticker in the log
+      - lambda: |-
+          auto time = id(ha_time).now();
+          ESP_LOGD("sun", "time=%s valid=%d TZ='%s' lat=%.1f lon=%.1f elev=%.1f", time.strftime("%Y-%m-%d %H:%M:%S %z").c_str(),
+            time.is_valid(), id(tz_text).state.c_str(), id(loc_lat).state, id(loc_lon).state,
+            id(sun_sun).elevation());
       # Every minute: a received MOTION/SENSOR expires after 10 min without refresh
+      # it needs a keepalive from the source-device or from HA when set from HA
       - lambda: |-
           id(tx_mute) = true;
-          if (id(motion_rx_ms) && millis() - id(motion_rx_ms) > 600000) {
+          if (id(motion_rx_ms) && millis() - id(motion_rx_ms) > 660000) {
             id(motion_rx_ms) = 0;
             id(motion_act).turn_off();
           }
-          if (id(sensor_rx_ms) && millis() - id(sensor_rx_ms) > 600000) {
+          if (id(sensor_rx_ms) && millis() - id(sensor_rx_ms) > 660000) {
             id(sensor_rx_ms) = 0;
             id(sensor_act).turn_off();
           }
