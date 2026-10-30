@@ -205,14 +205,14 @@ only one device so they will all respond.
 
 Because the clock is so important, unlike normal ESPHome, it does not reboot when it looses connectivity. If you simply wait for it to come back, you may wait a long time. But it does reboot... eventually
 
-If there is a valid clock, it does not reboot for 7 days! However if does not see any HA or NTP time sync, it will restart WiFi every 6 hours with a 10 minute pause.
-Eventually after 7 days without time sync, it gives up and reboots. Which means it looses the clock. Hopefully the full stack reset will unstuck something and it finally reconnects.
+- If there *is* a valid clock, it does not reboot for 30 days! However if does restart the wifi radio every day at about 13h00 to potentially unstuck it and rescan for strongest AP. (the normal AP rescan is disabled for reasons of UDP packet stability)
+- If there is a valid clock, and the time is resynced with NTP or HA regularly, it never reboots.
+- If there is *no* valid clock, *but* it needs one (if would not need one if only a wall switch input is configured), it will reboot every 6 hours
 
-If there is *no* valid clock, *but* it needs one (if would not need one if only a wall switch input is configured), it will reboot every 6 hours
+Additionally, if it does not find any WiFi, on wifi cycle or reboot, it will start the recovery access point, as is normal for ESPhome
 
-Basically this means you may need to wait 7 days unless if you manually power cycle. It also means that if the WiFi access point itself fails, this device will continue to work for 7 days, but then it will reboot, loose time, and still not find the AP. If you do not want that, remove the 7 day reboot from the compiled code, it may take months before the clock drifts significantly, and in the mean time it will keep to the schedule.
-
-If it does finally reboot, maybe triggered by a manual power cycle, it will start a recovery access point, as is normal for ESPhome.
+Basically this means if you really lost the device, you may need to wait until next day 13h10 or even up 30 days unless if you manually power cycle.
+However, during all this time, the device might still be faithfully switching the light from its internal clock and connected sensors. If it did not actually die completely. 
 
 ### Status
 
