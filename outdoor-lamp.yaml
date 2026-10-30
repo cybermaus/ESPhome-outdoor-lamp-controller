@@ -389,7 +389,7 @@ udp:
 
           if (param == "REQCONFIG" || param == "RECONNECT") {
             // For 2 seconds, ignore as likely our own request coming back as an echo :
-            if (!(id(req_sent) && millis() - id(last_req_ms) < 2000)) {
+            if (millis() - id(last_req_ms) >= 2000) {
               if (!id(group_peers).state) id(group_peers).turn_on();
               if (id(group_synced).state) {
                 // Only a suspect lamp answers a RECONNECT slowly :
@@ -590,9 +590,6 @@ globals:
     type: bool
     initial_value: 'false'
   # Time of our own last REQCONFIG, to ignore its echo
-  - id: req_sent
-    type: bool
-    initial_value: 'false'
   - id: last_req_ms
     type: uint32_t
     initial_value: '0'
@@ -1380,9 +1377,7 @@ script:
           } 
           // Boot / reconnect: background stagger in 20 to 30 min
           return (uint32_t) (1200000 + random_uint32() % 600000);
-      - lambda: |-
-          id(req_sent) = true;
-          id(last_req_ms) = millis();
+      - lambda: 'id(last_req_ms) = millis();'
       - if:
           condition:
             lambda: 'return !id(device_group).state.empty();'
@@ -1421,7 +1416,6 @@ script:
             # grab timestamp to ignore echo's
             - lambda: |-
                 id(send_reqconfig) = true;
-                id(req_sent) = true;
                 id(last_req_ms) = millis();
             - logger.log:
                 format: "out: LAMPGROUP:%s:REQCONFIG (retry)"
