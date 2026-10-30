@@ -80,8 +80,8 @@
 # CLOCK: Without a valid clock the sun and schedule cycle can do nothing. The wall
 # switch, SENSOR and MOTION keep working, as a missing clock must not disable a light.
 # Time is taken from HA (if available) or NTP 
-# -with- a valid clock, reboots are avoided, instead prolonged loss of connectivity 
-# will cycle the WiFi module. After 7 days of no connectivity, we give in and reboot
+# -with- a valid clock, reboots are avoided, instead prolonged loss of time sync will
+# cycle the WiFi module daily at 13h00. After 30 days we give in and reboot
 # -without- a valid clock but -with- a cycle that needs one, we reboot after only 6 hours.
 #
 # LABEL: This is a user mnemonic label, so they know which device. Chalet14 or Lamp03
@@ -310,7 +310,6 @@ logger:
 api:
   # This device works without HA, and we avoid reboots so we do not loose time
   # However prolonged lack of time sync will cycle the wifi module
-  # and 7 days no time sync will finally do a reboot
   reboot_timeout: 0s
 
 ota:
@@ -1605,7 +1604,7 @@ interval:
 
 
   # Every hour: count hours without a time sync, and act on it.
-  # We have valid clock, then cycle wifi, reboot after 7 days
+  # We have valid clock, then cycle wifi, reboot after 30 days
   # we have no valid clock, but do need one, reboot after 6 hours
   - interval: 1h
     then:
@@ -1614,24 +1613,13 @@ interval:
           // count the hours, the count is reset by time sync:
           id(unsynced_hours)++;
           int h = id(unsynced_hours);
-
-          // Only act every 6 hours:
-          if (h % 6 != 0 && h < 168) {
-            return;
-          }
-
           bool clock_valid = id(ha_time).now().is_valid();
           bool needs_clock = id(use_sun).state || id(use_schedule).state;
 
-          // Last resort: 7 days without a sync, or already no clock
-          if (h >= 168 || (!clock_valid && needs_clock)) {
+          // Reboot: 30 days without any sync, or 6 hours without a valid clock
+          // while the cycle needs one. Otherwise do nothing.
+          if (h >= 720 || (h >= 6 && !clock_valid && needs_clock)) {
             App.safe_reboot();
-            return;
-          }
-
-          // Otherwise cycle the WiFi:
-          if (!id(wifi_cycle).is_running()) {
-            id(wifi_cycle).execute();
           }
 
 
