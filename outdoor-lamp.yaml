@@ -968,8 +968,7 @@ text:
       sorting_weight: 110
     on_value:
       then:
-        # Hostname-safe: letters, digits and inner dashes only. Empty is allowed.
-        # Capitals are also allowed. Ignored by DNS, but allowed visually
+        # Hostname-safe: letters, digits, inner dashes, capitals ignored.
         - lambda: |-
             std::string h;
             for (char c : x) {
@@ -1008,6 +1007,21 @@ text:
         - lambda: |-
             id(sync_is_suspect) = false;
             id(req_fast) = true;
+        # Hostname-safe: letters, digits, inner dashes, capitals ignored.
+        - lambda: |-
+            std::string h;
+            for (char c : x) {
+              if (isalnum((unsigned char) c)) {
+                h += c;
+              } else if (!h.empty() && h.back() != '-') {
+                h += '-';
+              }
+            }
+            while (!h.empty() && h.back() == '-') h.pop_back();
+            if (h != x) {
+              id(device_group).make_call().set_value(h).perform();
+              id(device_group).publish_state(h);
+            }
         - script.execute: group_request
 
   # POSIX timezone string, see the header
@@ -1359,17 +1373,19 @@ script:
             // User did a group change: network is up, ask immediate, as a REQCONFIG
             id(req_fast) = false;
             id(send_reqconfig) = true;
-            return (uint32_t) 0;    // No wait
+            return (uint32_t) 500;  // Tiny wait for double group on_value call
           }
           if (!id(group_synced).state || id(sync_is_suspect)) {
             // Never synced (new device or new group): ask soon, as a REQCONFIG
             // or a former or real lone device : ask soon, as a REQCONFIG
             id(send_reqconfig) = true;
-            return (uint32_t) 5000; // Allow DHCP time to finish
+            return (uint32_t) 5000; // Allow 5 seconds for DHCP to finish
           }
           id(send_reqconfig) = false;
-          // Boot / reconnect: background stagger in 20 to 30 min
+          // Boot / reconnect, could be caused by side wide power failure :
+          // so we stagger config requests between 20 to 30 minutes :
           return (uint32_t) (1200000 + random_uint32() % 600000);
+ 
       - lambda: 'id(last_req_ms) = millis();'
       - if:
           condition:
