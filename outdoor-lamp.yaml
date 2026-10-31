@@ -233,14 +233,15 @@ substitutions:
 
   # values for Shelly-1, a ESP8266 with 2MB 
   # take note of the platform overrides below. If you change the board, it needs review
-#  use_board:       esp01_1m  # works for Shelly1 but override to 2M
-#  show_board:      Shelly1   # string shown in HA
-#  GPIO_relay:      GPIO4     # shelly-1 relay 
-#  relay_inverted:  false
-#  GPIO_wall_input: GPIO5     # shelly-1 wall switch input
-#  wall_inverted:   false
-#  wall_pullup:     false
-#  GPIO_Status_LED: GPIO2     # shelly-1 does not have, pick any
+  use_board:       esp01_1m  # works for Shelly1 but override to 2M
+  show_board:      Shelly1   # string shown in HA
+  GPIO_relay:      GPIO4     # shelly-1 relay 
+  relay_inverted:  false
+  GPIO_wall_input: GPIO5     # shelly-1 wall switch input
+  wall_inverted:   false
+  wall_pullup:     false
+  GPIO_Status_LED: GPIO2     # shelly-1 does not have, pick any
+  led_inverted:    true
 
   # values for my custom ESP12F nibe AUX & temperature PCB
   # take note of the platform overrides below. If you change the board, it needs review
@@ -252,15 +253,15 @@ substitutions:
 
   # values for Sonoff S20, a ESP8266 with 1MB 
   # REMOVE the 2M override !!
-  use_board:       esp01_1m  # works for Shelly1 but override to 2M
-  show_board:      Sonoff-S20   # string shown in HA
-  GPIO_relay:      GPIO12    # shelly-1 relay 
-  relay_inverted:  false
-  GPIO_wall_input: GPIO0     # Button not switch
-  wall_inverted:   false
-  wall_pullup:     true
-  GPIO_Status_LED: GPIO13     # LED inverted
-  led_inverted:    true
+#  use_board:       esp01_1m  # works for Shelly1 but override to 2M
+#  show_board:      Sonoff-S20   # string shown in HA
+#  GPIO_relay:      GPIO12    # shelly-1 relay 
+#  relay_inverted:  false
+#  GPIO_wall_input: GPIO0     # Button not switch
+#  wall_inverted:   false
+#  wall_pullup:     true
+#  GPIO_Status_LED: GPIO13     # LED inverted
+#  led_inverted:    true
 
   # Defaults of the runtime settings, used until the user changes them
   # for twilight calculations, 1 digit is enough, lets not burden user unput
@@ -295,9 +296,9 @@ esphome:
       - lambda: 'id(sync_is_suspect) = !id(group_peers).state && id(group_synced).state;'
       - script.execute: lamp_update
   # Override to 2MB for the classic Shelly1, also fine on the ESP12F
-#  platformio_options:
-#    board_upload.flash_size: 2MB
-#    board_build.ldscript: eagle.flash.2m64.ld
+  platformio_options:
+    board_upload.flash_size: 2MB
+    board_build.ldscript: eagle.flash.2m64.ld
 
 esp8266:
   board: ${use_board}
@@ -388,6 +389,33 @@ udp:
           std::string body = s.substr(g_end + 1);
           std::string param = body.compare(0, 10, "REQCONFIG;") == 0 ? "REQCONFIG"
                             : body.compare(0, 10, "RECONNECT;") == 0 ? "RECONNECT" : "";
+
+          // PEER:<ip>,<label>,<mac>; keep a table of peers, deduped on the MAC :
+          size_t pp = body.find("PEER:");
+          size_t pe = (pp == std::string::npos) ? pp : body.find(';', pp);
+          if (pe != std::string::npos) {
+            std::string v = body.substr(pp + 5, pe - pp - 5);
+            size_t c1 = v.find(',');
+            size_t c2 = (c1 == std::string::npos) ? c1 : v.find(',', c1 + 1);
+            if (c2 != std::string::npos) {
+              std::string mac = v.substr(c2 + 1);
+              std::string entry = v.substr(c1 + 1, c2 - c1 - 1) + "," + v.substr(0, c1) + "," + mac;
+              bool found = false;
+              bool changed = false;
+              for (auto &q : id(peers)) {
+                if (q.size() > mac.size() && q.compare(q.size() - mac.size(), mac.size(), mac) == 0) {
+                  found = true;
+                  if (q != entry) { q = entry; changed = true; }
+                  break;
+                }
+              }
+              if (!found && id(peers).size() < 40) {
+                id(peers).push_back(entry);
+                changed = true;
+              }
+              if (changed) std::sort(id(peers).begin(), id(peers).end());
+            }
+          }
 
           if (param == "REQCONFIG" || param == "RECONNECT") {
             // For 2 seconds, ignore as likely our own request coming back as an echo :
@@ -624,6 +652,9 @@ globals:
   # The final packet text of udp_tx, shared by its two sends and the log line
   - id: tx_buf
     type: std::string
+  # List of Peers seen, one "label,ip,mac" string each, sorted by label. RAM only.
+  - id: peers
+    type: std::vector<std::string>
   # Hours since the last time sync (NTP or HA), counted by the hourly interval
   - id: unsynced_hours
     type: int
@@ -1045,6 +1076,7 @@ text:
         - lambda: |-
             id(sync_is_suspect) = false;
             id(req_fast) = true;
+            id(peers).clear();
         # Hostname-safe: letters, digits, inner dashes, capitals ignored.
         - lambda: |-
             std::string h;
@@ -1676,13 +1708,15 @@ button:
     disabled_by_default: true
     on_press:
       - lambda: |-
-          ESP_LOGI("peers", "--- peers seen: 4 ---");
-          ESP_LOGI("peers", "http://192.168.1.101 Farm01 A4:CF:12:3B:7E:01");
-          ESP_LOGI("peers", "http://192.168.1.102 Farm02 A4:CF:12:3B:7E:02");
-          ESP_LOGI("peers", "http://192.168.1.106 House01 EC:FA:BC:55:90:11");
-          ESP_LOGI("peers", "<a href=\"http://192.168.1.107\">192.168.1.107</a> House02 EC:FA:BC:55:90:12");
-      
-      
+          ESP_LOGI("peers", "--- peers seen: %d ---", (int) id(peers).size());
+          for (auto &q : id(peers)) {
+            size_t c1 = q.find(',');
+            size_t c2 = q.find(',', c1 + 1);
+            ESP_LOGI("peers", "http://%s %s %s", q.substr(c1 + 1, c2 - c1 - 1).c_str(),
+                     q.substr(0, c1).c_str(), q.substr(c2 + 1).c_str());
+          }
+
+
 sensor:
   - platform: uptime
     name: "_Uptime"
