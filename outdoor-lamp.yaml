@@ -728,6 +728,9 @@ switch:
     web_server:
       sorting_weight: 202
 
+
+    # SENSOR action, indicates actual daylight sensor activation, either by this DEVICE
+    # or from a remote device or HA automation (note: a "Daylight" sensor comes on at Dark)
   - platform: template
     name: "Sensor"
     id: sensor_act
@@ -735,14 +738,16 @@ switch:
     optimistic: true
     restore_mode: ALWAYS_OFF
     disabled_by_default: true
-    on_turn_on:
-      - lambda: 'if (!id(tx_mute)) id(sensor_rx_ms) = 0;'
-      - script.execute: lamp_update
+    turn_on_action:
+      # SENSOR, when not driven locally by hardware, needs keepalive of a remote driver like HA
+      - lambda: 'id(sensor_rx_ms) = millis();'  # set keepalive timeout
       - script.execute:
           id: group_send
           param: "SENSOR"
+    on_turn_on:
+      - script.execute: lamp_update
     on_turn_off:
-      - lambda: 'if (!id(tx_mute)) id(sensor_rx_ms) = 0;'
+      - lambda: 'id(sensor_rx_ms) = 0;'         # disable keepalive timeout
       - script.execute: lamp_update
       - script.execute:
           id: group_send
@@ -750,6 +755,9 @@ switch:
     web_server:
       sorting_weight: 141
 
+
+    # MOTION action, indicates actual motion detected, either by this DEVICE
+    # or from a remote device or HA automation
   - platform: template
     name: "Motion"
     id: motion_act
@@ -757,18 +765,20 @@ switch:
     optimistic: true
     restore_mode: ALWAYS_OFF
     disabled_by_default: true
+    turn_on_action:
+      # MOTION, when not driven locally by hardware, needs keepalive of a remote driver like HA
+      - lambda: 'id(motion_rx_ms) = millis();' # set keepalive timeout
+      - script.execute:
+          id: group_send
+          param: "MOTION"
     on_turn_on:
-      - lambda: 'if (!id(tx_mute)) id(motion_rx_ms) = 0;'
       - script.execute: lamp_update
-      - script.execute:
-          id: group_send
-          param: "MOTION"
     on_turn_off:
-      - lambda: 'if (!id(tx_mute)) id(motion_rx_ms) = 0;'
-      - script.execute: lamp_update
+      - lambda: 'id(motion_rx_ms) = 0;'        # disable keepalive timeout
       - script.execute:
           id: group_send
           param: "MOTION"
+      - script.execute: lamp_update
     web_server:
       sorting_weight: 142
 
@@ -788,6 +798,7 @@ switch:
             binary_sensor.is_on: wall_switch
           then:
             - switch.turn_on: sensor_act
+            - lambda: 'id(sensor_rx_ms) = 0;'    # 0 indicates hardware origin
     on_turn_off:
       - switch.turn_off: sensor_act
     web_server:
@@ -809,6 +820,7 @@ switch:
             binary_sensor.is_on: wall_switch
           then:
             - switch.turn_on: motion_act
+            - lambda: 'id(sensor_rx_ms) = 0;'    # 0 indicates hardware origin
     on_turn_off:
       - switch.turn_off: motion_act
     web_server:
@@ -867,12 +879,20 @@ binary_sensor:
 
           if (id(use_sensor).state) {
             // Wall input is a daylight sensor: SENSOR follows the input 
-            if (x) id(sensor_act).turn_on(); else id(sensor_act).turn_off();
-            
+            if (x) {
+              id(sensor_act).turn_on();
+              id(sensor_rx_ms) = 0;     // hardware origin: no expiry, repeated every 5 min
+            } else {
+              id(sensor_act).turn_off();
+            }
           } else if (id(use_motion).state) {
             // Wall input is a motion sensor: MOTION follows the input
-            if (x) id(motion_act).turn_on(); else id(motion_act).turn_off();
-            
+            if (x) {
+              id(motion_act).turn_on();
+              id(motion_rx_ms) = 0;     // hardware origin: no expiry, repeated every 5 min
+            } else {
+              id(motion_act).turn_off();
+            }
           } else {
             // Hotel/hallway switch: every edge toggles the lamp.
             id(lamp_output).toggle().perform();
@@ -1302,6 +1322,7 @@ script:
   # Send one parameter to the group. The value is made here from the
   # parameter name, which is the uppercase ID.
   - id: group_send
+    mode: parallel # yes, we want parallel due to the delay below
     parameters:
       param: string
     then:
@@ -1309,6 +1330,7 @@ script:
           condition:
             lambda: 'return id(group_live) && !id(tx_mute) && !id(device_group).state.empty();'
           then:
+            - delay: 1ms # allow for any ON_xxxx call to actually set .state
             - lambda: |-
 
                 // Defining a value_of() internal lambda function     :
