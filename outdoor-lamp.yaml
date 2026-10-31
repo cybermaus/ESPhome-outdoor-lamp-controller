@@ -233,14 +233,14 @@ substitutions:
 
   # values for Shelly-1, a ESP8266 with 2MB 
   # take note of the platform overrides below. If you change the board, it needs review
-  use_board:       esp01_1m  # works for Shelly1 but override to 2M
-  show_board:      Shelly1   # string shown in HA
-  GPIO_relay:      GPIO4     # shelly-1 relay 
-  relay_inverted:  false
-  GPIO_wall_input: GPIO5     # shelly-1 wall switch input
-  wall_inverted:   false
-  wall_pullup:     false
-  GPIO_Status_LED: GPIO2     # shelly-1 does not have, pick any
+#  use_board:       esp01_1m  # works for Shelly1 but override to 2M
+#  show_board:      Shelly1   # string shown in HA
+#  GPIO_relay:      GPIO4     # shelly-1 relay 
+#  relay_inverted:  false
+#  GPIO_wall_input: GPIO5     # shelly-1 wall switch input
+#  wall_inverted:   false
+#  wall_pullup:     false
+#  GPIO_Status_LED: GPIO2     # shelly-1 does not have, pick any
 
   # values for my custom ESP12F nibe AUX & temperature PCB
   # take note of the platform overrides below. If you change the board, it needs review
@@ -249,6 +249,18 @@ substitutions:
 #  relay_inverted:  true      # all my ESP12F have the relay driven by a FET
 #  GPIO_wall_input: GPIO5     # 
 #  GPIO_Status_LED: GPIO2     # esp12f build in LED
+
+  # values for Sonoff S20, a ESP8266 with 1MB 
+  # REMOVE the 2M override !!
+  use_board:       esp01_1m  # works for Shelly1 but override to 2M
+  show_board:      Sonoff-S20   # string shown in HA
+  GPIO_relay:      GPIO12    # shelly-1 relay 
+  relay_inverted:  false
+  GPIO_wall_input: GPIO0     # Button not switch
+  wall_inverted:   false
+  wall_pullup:     true
+  GPIO_Status_LED: GPIO13     # LED inverted
+  led_inverted:    true
 
   # Defaults of the runtime settings, used until the user changes them
   # for twilight calculations, 1 digit is enough, lets not burden user unput
@@ -283,9 +295,9 @@ esphome:
       - lambda: 'id(sync_is_suspect) = !id(group_peers).state && id(group_synced).state;'
       - script.execute: lamp_update
   # Override to 2MB for the classic Shelly1, also fine on the ESP12F
-  platformio_options:
-    board_upload.flash_size: 2MB
-    board_build.ldscript: eagle.flash.2m64.ld
+#  platformio_options:
+#    board_upload.flash_size: 2MB
+#    board_build.ldscript: eagle.flash.2m64.ld
 
 esp8266:
   board: ${use_board}
@@ -374,8 +386,8 @@ udp:
           // Everything after the group is a series of items, each ended by ';':
           //   NAME;   or   NAME:value;   Only ended items count, a cut packet is ignored.
           std::string body = s.substr(g_end + 1);
-          std::string param = (body == "REQCONFIG;" || body == "RECONNECT;")
-                              ? body.substr(0, body.size() - 1) : "";
+          std::string param = body.compare(0, 10, "REQCONFIG;") == 0 ? "REQCONFIG"
+                            : body.compare(0, 10, "RECONNECT;") == 0 ? "RECONNECT" : "";
 
           if (param == "REQCONFIG" || param == "RECONNECT") {
             // For 2 seconds, ignore as likely our own request coming back as an echo :
@@ -609,11 +621,13 @@ globals:
   # we stagger the send of UDP to avoid issues with accasional buffer problems on UDP send
   - id: udp_queue
     type: std::vector<std::string>
+  # The final packet text of udp_tx, shared by its two sends and the log line
+  - id: tx_buf
+    type: std::string
   # Hours since the last time sync (NTP or HA), counted by the hourly interval
   - id: unsynced_hours
     type: int
     initial_value: '0'
-    
   # A manual group change does an immediate requestconfig  
   - id: req_fast
     type: bool
@@ -660,7 +674,7 @@ light:
     id: led_output
     pin:
       number: ${GPIO_Status_LED}
-      inverted: true
+      inverted: ${led_inverted}
     restore_mode: ALWAYS_OFF
     internal: true
 
@@ -1441,22 +1455,9 @@ script:
           condition:
             lambda: 'return !id(device_group).state.empty();'
           then:
-            - logger.log:
-                format: "out: LAMPGROUP:%s:%s"
-                args: ['id(device_group).state.c_str()', 'id(send_reqconfig) ? "REQCONFIG" : "RECONNECT"']
-                level: DEBUG
-                tag: udp
-            - udp.write:
-                id: lamp_udp
-                data: !lambda |-
-                  std::string s = "LAMPGROUP:" + id(device_group).state + (id(send_reqconfig) ? ":REQCONFIG;" : ":RECONNECT;");
-                  return std::vector<uint8_t>(s.begin(), s.end());
-            - delay: ${udp_retry}
-            - udp.write:
-                id: lamp_udp
-                data: !lambda |-
-                  std::string s = "LAMPGROUP:" + id(device_group).state + (id(send_reqconfig) ? ":REQCONFIG;" : ":RECONNECT;");
-                  return std::vector<uint8_t>(s.begin(), s.end());
+            - script.execute:
+                id: udp_tx
+                msg: !lambda 'return "LAMPGROUP:" + id(device_group).state + (id(send_reqconfig) ? ":REQCONFIG;" : ":RECONNECT;");'
       - delay: 10s
       # Nothing from our group arrived: we are alone, so we assume we are synced.
       - if:
@@ -1476,22 +1477,9 @@ script:
             - lambda: |-
                 id(send_reqconfig) = true;
                 id(last_req_ms) = millis();
-            - logger.log:
-                format: "out: LAMPGROUP:%sREQCONFIG (retry)"
-                args: ['id(device_group).state.c_str()']
-                level: DEBUG
-                tag: udp
-            - udp.write:
-                id: lamp_udp
-                data: !lambda |-
-                  std::string s = "LAMPGROUP:" + id(device_group).state + ":REQCONFIG;";
-                  return std::vector<uint8_t>(s.begin(), s.end());
-            - delay: ${udp_retry}
-            - udp.write:
-                id: lamp_udp
-                data: !lambda |-
-                  std::string s = "LAMPGROUP:" + id(device_group).state + ":REQCONFIG;";
-                  return std::vector<uint8_t>(s.begin(), s.end());
+            - script.execute:
+                id: udp_tx
+                msg: !lambda 'return "LAMPGROUP:" + id(device_group).state + ":REQCONFIG;";'
 
 
   # Answer a REQCONFIG or RECONNECT send everything as s single packet
@@ -1504,6 +1492,27 @@ script:
           param: "DUMP"
 
 
+  # Send one packet twice: adds the PEER item, logs the exact wire text.
+  # Queued, so two callers cannot interleave their copies.
+  - id: udp_tx
+    mode: queued
+    parameters:
+      msg: string
+    then:
+      - lambda: |-
+          id(tx_buf) = msg + "PEER:" + std::string(WiFi.localIP().toString().c_str()) + "," +
+                       id(device_label).state + "," + get_mac_address_pretty() + ";";
+          ESP_LOGD("udp", "out: %s", id(tx_buf).c_str());
+      - udp.write:
+          id: lamp_udp
+          data: !lambda 'return std::vector<uint8_t>(id(tx_buf).begin(), id(tx_buf).end());'
+      # sending it twice to counter lossy UDP
+      - delay: ${udp_retry}
+      - udp.write:
+          id: lamp_udp
+          data: !lambda 'return std::vector<uint8_t>(id(tx_buf).begin(), id(tx_buf).end());'
+
+
   # Send the queued packets one by one, 20 ms apart, so a burst of changes
   # does not exhaust the network buffers.
   - id: group_flush
@@ -1513,23 +1522,10 @@ script:
           condition:
             lambda: 'return !id(udp_queue).empty();'
           then:
-            - logger.log:
-                format: "out: %s"
-                args: ['id(udp_queue).front().c_str()']
-                level: DEBUG
-                tag: udp
-            - udp.write:
-                id: lamp_udp
-                data: !lambda |-
-                  std::string s = id(udp_queue).front();
-                  return std::vector<uint8_t>(s.begin(), s.end());
-            # sending it twice to counter lossy UDP
-            - delay: ${udp_retry}
-            - udp.write:
-                id: lamp_udp
-                data: !lambda |-
-                  std::string s = id(udp_queue).front();
-                  return std::vector<uint8_t>(s.begin(), s.end());
+            - script.execute:
+                id: udp_tx
+                msg: !lambda 'return id(udp_queue).front();'
+            - script.wait: udp_tx
             - lambda: 'id(udp_queue).erase(id(udp_queue).begin());'
             - delay: 20ms
 
@@ -1673,7 +1669,20 @@ button:
     disabled_by_default: true
     entity_category: diagnostic
 
-
+  - platform: template
+    name: "_Group writeout peers"
+    id: peers_log_test
+    entity_category: diagnostic
+    disabled_by_default: true
+    on_press:
+      - lambda: |-
+          ESP_LOGI("peers", "--- peers seen: 4 ---");
+          ESP_LOGI("peers", "http://192.168.1.101 Farm01 A4:CF:12:3B:7E:01");
+          ESP_LOGI("peers", "http://192.168.1.102 Farm02 A4:CF:12:3B:7E:02");
+          ESP_LOGI("peers", "http://192.168.1.106 House01 EC:FA:BC:55:90:11");
+          ESP_LOGI("peers", "<a href=\"http://192.168.1.107\">192.168.1.107</a> House02 EC:FA:BC:55:90:12");
+      
+      
 sensor:
   - platform: uptime
     name: "_Uptime"
