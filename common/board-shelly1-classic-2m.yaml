@@ -6,10 +6,11 @@ substitutions:
   GPIO_wall_input: GPIO5     # wall switch input
   wall_inverted:   false
   wall_pullup:     false
+  pushbutton:      "false"
   GPIO_Status_LED: GPIO2     # shelly-1 does not have one, pick any
-  led_inverted:    false
+  led_inverted:    true
   web_local:       false
-
+  
 esphome:
   platformio_options:
     board_upload.flash_size: 2MB

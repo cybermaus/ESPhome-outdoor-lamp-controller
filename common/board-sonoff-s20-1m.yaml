@@ -5,9 +5,10 @@ substitutions:
   GPIO_relay:      GPIO12     # relay
   relay_inverted:  false
   GPIO_wall_input: GPIO0      # has push button, not switch
-  wall_inverted:   false
+  wall_inverted:   true
   wall_pullup:     true
-  GPIO_Status_LED: GPIO13     # RED is hard to relay, this is the blue led
+  pushbutton:      "true"
+  GPIO_Status_LED: GPIO13     # RED is hardlinked to relay, this is the blue led
   led_inverted:    true
   web_local:       false
 

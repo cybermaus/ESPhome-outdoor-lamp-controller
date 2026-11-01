@@ -795,6 +795,7 @@ switch:
     entity_category: config
     disabled_by_default: true
     optimistic: true
+    internal: ${pushbutton} # cannot do this on pushbutton devices
     restore_mode: RESTORE_DEFAULT_OFF
     on_turn_on:
       - switch.turn_off: use_motion
@@ -817,6 +818,7 @@ switch:
     entity_category: config
     disabled_by_default: true
     optimistic: true
+    internal: ${pushbutton} # cannot do this on pushbutton devices
     restore_mode: RESTORE_DEFAULT_OFF
     on_turn_on:
       - switch.turn_off: use_sensor
@@ -902,9 +904,11 @@ binary_sensor:
             }
           } else {
             // Hotel/hallway switch: every edge toggles the lamp.
-            id(lamp_output).toggle().perform();
-          }
-         
+            // Pushbutton: only the press edge toggles.
+            if (!${pushbutton} || x) {
+              id(lamp_output).toggle().perform();
+            }
+          }         
 
 select:
   # What counts as sun up / down

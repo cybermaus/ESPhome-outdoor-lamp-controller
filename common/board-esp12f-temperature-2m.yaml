@@ -6,8 +6,9 @@ substitutions:
   GPIO_wall_input: GPIO5
   wall_inverted:   false
   wall_pullup:     false
+  pushbutton:      "false"
   GPIO_Status_LED: GPIO2     # built-in LED
-  led_inverted:    false
+  led_inverted:    true
   web_local:       false
 
 esphome:
