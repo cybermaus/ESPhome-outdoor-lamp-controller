@@ -227,7 +227,7 @@ packages:
   # Pick one board. Pins, inversion and the platform block live there.
   # board: !include common/board-shelly1-classic-2m.yaml
   # board: !include common/board-esp12f-temperature-2m.yaml
-  board: !include common/board-sonoff-s20-1m.yaml
+  # board: !include common/board-sonoff-s20-1m.yaml
 
 substitutions:
 # Substitutions like hardware pins from common/board-.....yaml added from packages
