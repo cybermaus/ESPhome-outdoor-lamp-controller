@@ -220,52 +220,22 @@
 #   - A lamp that requested config but did not get a COMPLETE packet, it repeats the request
 #
 
+#######################################################################################
+
+packages:
+  diagnostics: !include common/diagnostics.yaml
+  # Pick one board. Pins, inversion and the platform block live there.
+  # board: !include common/board-shelly1-classic-2m.yaml
+  # board: !include common/board-esp12f-temperature-2m.yaml
+  board: !include common/board-sonoff-s20-1m.yaml
 
 substitutions:
+# Substitutions like hardware pins from common/board-.....yaml added from packages
   devicename: outdoor-lamp
   description: Outdoor lamp controller.
   prj_version: "2026.10.30"
 
-  # Pins
-  # Relay boards often are active low, if so set inverted: true on the relay
-  # Defaults are for a classic Shelly1 which I use on almost all of these lantarns
-  # Warning to self: Dont use as is for the newer Shellys
-
-  # values for Shelly-1, a ESP8266 with 2MB 
-  # take note of the platform overrides below. If you change the board, it needs review
-  use_board:       esp01_1m  # works for Shelly1 but override to 2M
-  show_board:      Shelly1   # string shown in HA
-  GPIO_relay:      GPIO4     # shelly-1 relay 
-  relay_inverted:  false
-  GPIO_wall_input: GPIO5     # shelly-1 wall switch input
-  wall_inverted:   false
-  wall_pullup:     false
-  GPIO_Status_LED: GPIO2     # shelly-1 does not have, pick any
-  led_inverted:    true
-
-  # values for my custom ESP12F nibe AUX & temperature PCB
-  # take note of the platform overrides below. If you change the board, it needs review
-#  show_board:      ESP12F    # string shown in HA
-#  GPIO_relay:      GPIO4     # esp12f nibe AUX & temperature PCB
-#  relay_inverted:  true      # all my ESP12F have the relay driven by a FET
-#  GPIO_wall_input: GPIO5     # 
-#  GPIO_Status_LED: GPIO2     # esp12f build in LED
-
-  # values for Sonoff S20, a ESP8266 with 1MB 
-  # REMOVE the 2M override !!
-#  use_board:       esp01_1m  # works for Shelly1 but override to 2M
-#  show_board:      Sonoff-S20   # string shown in HA
-#  GPIO_relay:      GPIO12    # shelly-1 relay 
-#  relay_inverted:  false
-#  GPIO_wall_input: GPIO0     # Button not switch
-#  wall_inverted:   false
-#  wall_pullup:     true
-#  GPIO_Status_LED: GPIO13     # LED inverted
-#  led_inverted:    true
-
-  # Defaults of the runtime settings, used until the user changes them
-  # for twilight calculations, 1 digit is enough, lets not burden user unput
-  # Default at Tiveden, because that's where I'll be using them, you can put in yours
+  # Defaults compile locations, user can change them
 #  default_latitude:  "58.7" # Tiveden, SE
 #  default_longitude: "14.6" # Tiveden, SE
   default_latitude:  "51.6" # Fijnaart, NL
@@ -295,14 +265,6 @@ esphome:
     then:
       - lambda: 'id(sync_is_suspect) = !id(group_peers).state && id(group_synced).state;'
       - script.execute: lamp_update
-  # Override to 2MB for the classic Shelly1, also fine on the ESP12F
-  platformio_options:
-    board_upload.flash_size: 2MB
-    board_build.ldscript: eagle.flash.2m64.ld
-
-esp8266:
-  board: ${use_board}
-  restore_from_flash: true
 
 logger:
   level: DEBUG
@@ -344,14 +306,12 @@ wifi:
 
 captive_portal:
 
-# Note: v3 loads its JS from oi.esphome.io, so the WebUI would need internet.
-# unless if we force local at 100KB cost. remove when running on a 1MB flash device
 web_server:
   port: 80
   version: 3
-#  I used to think I liked local, but the 100K javascript being served makes the device laggy
-#  over a group of devices on the edge of an overreaching wifi. 
-#  local: true
+#  Still not sure on the wisdom of keeping it local vs having small devices serve up 100K
+#  in any case, if a 1M device, it will not fit.
+#  local: ${web_local)
 
 #######################################################################################
 
@@ -912,7 +872,9 @@ binary_sensor:
   - platform: gpio
     pin:
       number: ${GPIO_wall_input}
-#      mode: INPUT_PULLUP
+      mode:
+        input: true
+        pullup: ${wall_pullup}
       inverted: ${wall_inverted}
     id: wall_switch
     internal: true
@@ -1691,15 +1653,7 @@ interval:
 
 
 button:
-  - platform: restart
-    name: "_Restart"
-    disabled_by_default: true
-    entity_category: diagnostic
-
-  - platform: factory_reset
-    name: "_Restart Factory Default"
-    disabled_by_default: true
-    entity_category: diagnostic
+# Common diagnostic text buttons from common/diagnostics.yaml added from packages
 
   - platform: template
     name: "_Group writeout peers"
@@ -1718,16 +1672,7 @@ button:
 
 
 sensor:
-  - platform: uptime
-    name: "_Uptime"
-    disabled_by_default: true
-    entity_category: diagnostic
-
-  - platform: wifi_signal
-    name: "_Wi-Fi Signal"
-    update_interval: 60s
-    disabled_by_default: true
-    entity_category: diagnostic
+# Common diagnostic sensors from common/diagnostics.yaml are added from packages
 
   # Talk about unneeded diagnostics
   # I wish these could be hidden_by_default
@@ -1738,6 +1683,8 @@ sensor:
 #      name: "_Loop time"
 
 text_sensor:
+# Common diagnostic text sensors from common/diagnostics.yaml added from packages
+
   # Calculated lamp times of today
   - platform: template
     name: "Lamp Schedule"
@@ -1756,24 +1703,6 @@ text_sensor:
     disabled_by_default: true
     web_server:
       sorting_weight: 132
-
-
-  - platform: wifi_info
-    ip_address:
-      name: "_IP Address"
-      disabled_by_default: true
-    ssid:
-      name: "_Wi-Fi SSID"
-      disabled_by_default: true
-    bssid:
-      name: "_Wi-Fi BSSID"
-      disabled_by_default: true
-
-  - platform: version
-    name: "_ESPHome Version"
-    hide_timestamp: true
-    disabled_by_default: true
-    entity_category: diagnostic
 
   # Talk about unneeded diagnostics
   # actually, with time came multiple hardware devices

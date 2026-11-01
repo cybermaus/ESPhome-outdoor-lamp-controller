@@ -1,0 +1,20 @@
+# Board: Shelly1 classic (v1 to v3), ESP8266 with 2MB flash
+substitutions:
+  show_board:      Shelly1   # string shown in HA
+  GPIO_relay:      GPIO4     # relay
+  relay_inverted:  false
+  GPIO_wall_input: GPIO5     # wall switch input
+  wall_inverted:   false
+  wall_pullup:     false
+  GPIO_Status_LED: GPIO2     # shelly-1 does not have one, pick any
+  led_inverted:    false
+  web_local:       false
+
+esphome:
+  platformio_options:
+    board_upload.flash_size: 2MB
+    board_build.ldscript: eagle.flash.2m64.ld
+
+esp8266:
+  board: esp01_1m
+  restore_from_flash: true

@@ -1,0 +1,20 @@
+# Board: ESP12F on custom nibe AUX & temperature PCB, 4MB flash but use 2MB
+substitutions:
+  show_board:      ESP12F    # string shown in HA
+  GPIO_relay:      GPIO4     # relay driven by a FET
+  relay_inverted:  true
+  GPIO_wall_input: GPIO5
+  wall_inverted:   false
+  wall_pullup:     false
+  GPIO_Status_LED: GPIO2     # built-in LED
+  led_inverted:    false
+  web_local:       false
+
+esphome:
+  platformio_options:
+    board_upload.flash_size: 2MB
+    board_build.ldscript: eagle.flash.2m64.ld
+
+esp8266:
+  board: esp01_1m
+  restore_from_flash: true

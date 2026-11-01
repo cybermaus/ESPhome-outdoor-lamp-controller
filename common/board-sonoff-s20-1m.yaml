@@ -1,0 +1,21 @@
+# Board: Sonoff s20 wall-wart switch, ESP8266 with 1MB flash
+# This board has only 1MB, we made to save some more space then just web_local
+substitutions:
+  show_board:      Sonoff-S20 # string shown in HA
+  GPIO_relay:      GPIO12     # relay
+  relay_inverted:  false
+  GPIO_wall_input: GPIO0      # has push button, not switch
+  wall_inverted:   false
+  wall_pullup:     true
+  GPIO_Status_LED: GPIO13     # RED is hard to relay, this is the blue led
+  led_inverted:    true
+  web_local:       false
+
+#esphome:
+#  platformio_options:
+#    board_upload.flash_size: 2MB
+#    board_build.ldscript: eagle.flash.2m64.ld
+
+esp8266:
+  board: esp01_1m
+  restore_from_flash: true
