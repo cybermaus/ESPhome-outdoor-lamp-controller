@@ -309,6 +309,7 @@ captive_portal:
 web_server:
   port: 80
   version: 3
+  include_internal: true # many diagnistics are not send to HA to minimize traffic
 #  Still not sure on the wisdom of keeping it local vs having small devices serve up 100K
 #  in any case, if a 1M device, it will not fit.
 #  local: ${web_local)
@@ -655,20 +656,14 @@ output:
     pin: ${GPIO_relay}
     id: relay_output
     inverted: ${relay_inverted}
-    # Use "inverted: true" if the relay board is active low
-    
-  
-light:
-  # Visual watchdog, blinked from the interval below
-  - platform: status_led
-    name: "Led"
-    id: led_output
+  - platform: gpio
     pin:
       number: ${GPIO_Status_LED}
       inverted: ${led_inverted}
-    restore_mode: ALWAYS_OFF
-    internal: true
-
+    id: led_output
+    
+  
+light:
   # The lamp. Switched by the cycle, the group, the wall switch and HA.
   # Every change is broadcast, see group_send.
   - platform: binary
@@ -687,6 +682,7 @@ light:
           param: "LAMP"
     web_server:
       sorting_weight: 100
+
 
 switch:
   # Use the schedule_on / schedule_off times. See the header.
@@ -840,6 +836,7 @@ switch:
     id: group_synced
     entity_category: diagnostic
     disabled_by_default: true
+    internal: true # many diagnistics are not send to HA to minimize traffic
     optimistic: true
     restore_mode: RESTORE_DEFAULT_OFF
 
@@ -849,6 +846,7 @@ switch:
     id: group_peers
     entity_category: diagnostic
     disabled_by_default: true
+    internal: true # many diagnistics are not send to HA to minimize traffic
     optimistic: true
     restore_mode: RESTORE_DEFAULT_OFF
     
@@ -858,6 +856,7 @@ switch:
     id: debug_log
     entity_category: diagnostic
     disabled_by_default: true
+    internal: true # many diagnistics are not send to HA to minimize traffic
     optimistic: true
     restore_mode: RESTORE_DEFAULT_OFF
     on_turn_on:
@@ -880,6 +879,7 @@ binary_sensor:
       inverted: ${wall_inverted}
     id: wall_switch
     internal: true
+    disabled_by_default: true
     filters:
       - delayed_on: 50ms
       - delayed_off: 50ms
@@ -1581,9 +1581,9 @@ interval:
   # Every 10 seconds blink the LED for 0.1 s: visual "still running"
   - interval: 10seconds
     then:
-      - light.toggle: led_output
+      - output.turn_on: led_output
       - delay: 0.1s
-      - light.toggle: led_output
+      - output.turn_off: led_output
 
   # Every minute re-evaluate the cycle
   - interval: 1min
@@ -1688,6 +1688,7 @@ button:
     id: peers_log_test
     entity_category: diagnostic
     disabled_by_default: true
+    internal: true # many diagnistics are not send to HA to minimize traffic
     on_press:
       - lambda: |-
           ESP_LOGI("peers", "--- peers seen: %d ---", (int) id(peers).size());
@@ -1719,6 +1720,8 @@ text_sensor:
     id: lamp_info
     icon: mdi:lightbulb-auto-outline
     update_interval: never
+    filters: # filter out unchanged updates
+      - lambda: static std::string last; if (x == last) return {}; last = x; return x;
     web_server:
       sorting_weight: 131
 
@@ -1729,6 +1732,9 @@ text_sensor:
     icon: mdi:weather-sunset
     update_interval: never
     disabled_by_default: true
+    internal: true # many diagnistics are not send to HA to minimize traffic
+    filters: # filter out unchanged updates
+      - lambda: static std::string last; if (x == last) return {}; last = x; return x;
     web_server:
       sorting_weight: 132
 
@@ -1738,6 +1744,7 @@ text_sensor:
     id: sync_age
     entity_category: diagnostic
     disabled_by_default: true
+    internal: true # many diagnistics are not send to HA to minimize traffic
     update_interval: never
 
   # Talk about unneeded diagnostics

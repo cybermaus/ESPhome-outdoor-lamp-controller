@@ -5,11 +5,13 @@ button:
   - platform: restart
     name: "_Restart"
     disabled_by_default: true
+    internal: true # many diagnistics are not send to HA to minimize traffic
     entity_category: diagnostic
 
   - platform: factory_reset
     name: "_Restart Factory Default"
     disabled_by_default: true
+    internal: true # many diagnistics are not send to HA to minimize traffic
     entity_category: diagnostic
 
 sensor:
@@ -17,12 +19,14 @@ sensor:
   - platform: uptime
     name: "_Uptime"
     disabled_by_default: true
+    internal: true # many diagnistics are not send to HA to minimize traffic
     entity_category: diagnostic
 
   - platform: wifi_signal
     name: "_Wi-Fi Signal"
     update_interval: 60s
     disabled_by_default: true
+    internal: true # many diagnistics are not send to HA to minimize traffic
     entity_category: diagnostic
 
 text_sensor:
@@ -31,15 +35,19 @@ text_sensor:
     ip_address:
       name: "_IP Address"
       disabled_by_default: true
+      internal: true # many diagnistics are not send to HA to minimize traffic
     ssid:
       name: "_Wi-Fi SSID"
       disabled_by_default: true
+      internal: true # many diagnistics are not send to HA to minimize traffic
     bssid:
       name: "_Wi-Fi BSSID"
       disabled_by_default: true
+      internal: true # many diagnistics are not send to HA to minimize traffic
 
   - platform: version
     name: "_ESPHome Version"
     hide_timestamp: true
     disabled_by_default: true
+    internal: true # many diagnistics are not send to HA to minimize traffic
     entity_category: diagnostic
