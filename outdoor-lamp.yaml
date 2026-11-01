@@ -547,7 +547,7 @@ time:
   - platform: homeassistant
     id: ha_time
     on_time_sync:
-      - lambda: 'id(unsynced_hours) = 0;'
+      - lambda: id(last_clock_sync_ms) = millis();
       - script.execute: lamp_update
   - platform: sntp
     id: ntp_time
@@ -565,7 +565,7 @@ time:
     servers:
       - 0.pool.ntp.org
     on_time_sync:
-      - lambda: 'id(unsynced_hours) = 0;'
+      - lambda: id(last_clock_sync_ms) = millis();
       - script.execute: lamp_update
 
 # Sun position and sunrise/sunset, calculated locally.
@@ -615,9 +615,9 @@ globals:
   # List of Peers seen, one "label,ip,mac" string each, sorted by label. RAM only.
   - id: peers
     type: std::vector<std::string>
-  # Hours since the last time sync (NTP or HA), counted by the hourly interval
-  - id: unsynced_hours
-    type: int
+  # Last clock sync in millis() 0 means never since boot
+  - id: last_clock_sync_ms
+    type: uint32_t
     initial_value: '0'
   # A manual group change does an immediate requestconfig  
   - id: req_fast
@@ -1588,6 +1588,15 @@ interval:
           ESP_LOGD("sun", "time=%s valid=%d TZ='%s' lat=%.1f lon=%.1f elev=%.1f", time.strftime("%Y-%m-%d %H:%M:%S %z").c_str(),
             time.is_valid(), id(tz_text).state.c_str(), id(loc_lat).state, id(loc_lon).state,
             id(sun_sun).elevation());
+      # Every minute: show the age of the last clock sync in the diagnostics
+      - lambda: |-
+          if (id(last_clock_sync_ms) == 0) {
+            id(sync_age).publish_state("never");
+          } else {
+            char b[24];
+            snprintf(b, sizeof(b), "%u minutes", (unsigned) ((millis() - id(last_clock_sync_ms)) / 60000));
+            id(sync_age).publish_state(b);
+          }
       # Every minute: a received MOTION/SENSOR expires after 10 min without refresh
       # it needs a keepalive from the source-device or from HA when set from HA
       - lambda: |-
@@ -1639,14 +1648,16 @@ interval:
     then:
       - lambda: |-
 
-          // count the hours, the count is reset by time sync:
-          id(unsynced_hours)++;
-          int h = id(unsynced_hours);
+          // hours since the last clock sync, or since boot when never synced:
+          uint32_t last = id(last_clock_sync_ms);
+          uint32_t age_ms = last ? (millis() - last) : millis();
+          int h = age_ms / 3600000;
           bool clock_valid = id(ha_time).now().is_valid();
           bool needs_clock = id(use_sun).state || id(use_schedule).state;
 
           // Reboot: 30 days without any sync, or 6 hours without a valid clock
           // while the cycle needs one. Otherwise do nothing.
+          // note that the ms counter cycles at 49 days, so 45 days would be the max
           if (h >= 720 || (h >= 6 && !clock_valid && needs_clock)) {
             App.safe_reboot();
           }
@@ -1703,6 +1714,14 @@ text_sensor:
     disabled_by_default: true
     web_server:
       sorting_weight: 132
+
+  # Minutes since the last clock sync (NTP or HA)
+  - platform: template
+    name: "_Clock sync age"
+    id: sync_age
+    entity_category: diagnostic
+    disabled_by_default: true
+    update_interval: never
 
   # Talk about unneeded diagnostics
   # actually, with time came multiple hardware devices
