@@ -1322,6 +1322,8 @@ script:
             static char ntp_buf[16];      // must stay valid, SNTP keeps the pointer
             snprintf(ntp_buf, sizeof(ntp_buf), "%u.%u.%u.%u", gw[0], gw[1], gw[2], gw[3]);
             configTime(0, 0, ntp_buf, "0.pool.ntp.org");
+            // TODO remove after NTP Ubiqiti debug
+            ESP_LOGI("ntp", "NTP servers: %s, 0.pool.ntp.org", ntp_buf); 
             if (!id(tz_text).state.empty()) {
               id(ha_time).set_timezone(id(tz_text).state);
             }
@@ -1588,6 +1590,17 @@ interval:
           ESP_LOGD("sun", "time=%s valid=%d TZ='%s' lat=%.1f lon=%.1f elev=%.1f", time.strftime("%Y-%m-%d %H:%M:%S %z").c_str(),
             time.is_valid(), id(tz_text).state.c_str(), id(loc_lat).state, id(loc_lon).state,
             id(sun_sun).elevation());
+      # Every minute while WiFi is up but the clock is not valid: poll NTP again,
+      # instead of waiting for the normal 15 min interval
+      - if:
+          condition:
+            lambda: 'return WiFi.status() == WL_CONNECTED && !id(ha_time).now().is_valid();'
+          then:
+            - logger.log:  # TODO removed after NTP with Ubiqiti debug
+                format: "NTP retry, no clock yet"
+                level: INFO
+                tag: ntp
+            - component.update: ntp_time
       # Every minute: show the age of the last clock sync in the diagnostics
       - lambda: |-
           if (id(last_clock_sync_ms) == 0) {
