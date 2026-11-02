@@ -1171,25 +1171,21 @@ script:
           if (mot && (!time.is_valid() || id(sun_sun).elevation() < thr)) {
             id(sensor_driven) = true;
             id(lamp_target) = 1;
-            snprintf(buf, sizeof(buf), "Motion detected");
-            id(lamp_info).publish_state(buf);
             return;
           }
 
           // Neither sun nor schedule: only SENSOR, MOTION or the manual switch.
           // Needs no clock.
           if (!sun && !scd) {
+            snprintf(buf, sizeof(buf), "Manual switch only");
             if (sns) {
               id(sensor_driven) = true;
               id(lamp_target) = 1;
-              snprintf(buf, sizeof(buf), "Daylight sensor active");
             } else if (id(sensor_driven)) {
               id(sensor_driven) = false; // released: back to off
               id(lamp_target) = 0;
-              snprintf(buf, sizeof(buf), "Manual switch only");
             } else {
               id(lamp_applied) = -1;     // forget, next one is a first state
-              snprintf(buf, sizeof(buf), "Manual switch only");
             }
             id(lamp_info).publish_state(buf);
             return;
@@ -1199,8 +1195,8 @@ script:
           // No valid clock; the cycle does nothing. Forget the applied state, so the:
           // next one counts as a first state and is not broadcast:
           if (!time.is_valid()) {
-            id(lamp_applied) = -1;
             snprintf(buf, sizeof(buf), "No valid clock, manual only");
+            id(lamp_applied) = -1;
             id(lamp_info).publish_state(buf);
             return;
           }
