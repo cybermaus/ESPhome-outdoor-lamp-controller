@@ -532,10 +532,9 @@ udp:
 
 
 time:
-  # Two sources, both set the same system clock, so time is valid after a
-  # reboot even if HA is not up yet (or the gateway has no NTP).
+  # Two sources, both set the same system clock, so time is valid after
+  # either one. 
   # The lambdas use ha_time.now(), which reads that shared clock.
-  # The timezone is set from the Timezone text, see lamp_update.
   - platform: homeassistant
     id: ha_time
     on_time_sync:
@@ -544,6 +543,11 @@ time:
   - platform: sntp
     id: ntp_time
     timezone: ${default_timezone}
+#    servers:
+#      - ${udp_broadcast} # Servers are added and cycled at net_setup
+    on_time_sync:
+      - lambda: id(last_clock_sync_ms) = millis();
+      - script.execute: lamp_update
     # Daily WiFi refresh at 13:00, see wifi_cycle
     on_time:
       - seconds: 0
@@ -551,14 +555,6 @@ time:
         hours: 13
         then:
           - script.execute: wifi_cycle
-    # Start values only.
-    # When WiFi connects, net_setup adds the DHCP gateway
-    # as server 1 and the pool server becomes server 2.
-    servers:
-      - 0.pool.ntp.org
-    on_time_sync:
-      - lambda: id(last_clock_sync_ms) = millis();
-      - script.execute: lamp_update
 
 # Sun position and sunrise/sunset, calculated locally.
 # Latitude / longitude here are only the start values, lamp_update sets
@@ -1301,24 +1297,28 @@ script:
       - script.execute: lamp_update
       - lambda: 'id(tx_mute) = false;'
 
-  # NTP server = DHCP gateway, assumed to run NTP. Server 2 stays the pool,
-  # needs internet, harmless without. configTime restarts the SNTP client and
-  # also resets the timezone, so that is put back at once.
+  # NTP server = rotate through gateway + 0.pool through 3.pool
+  # build in NTP server does not rotate, sticks to the first entry
   - id: net_setup
     mode: restart
     then:
       - lambda: |-
+          bool time_is_stale = ! id(ha_time).now().is_valid() || (millis() - id(last_clock_sync_ms)) > 7200000;
           IPAddress gw = WiFi.gatewayIP();
-          if (gw != IPAddress(0, 0, 0, 0)) {
-            static char ntp_buf[16];      // must stay valid, SNTP keeps the pointer
-            snprintf(ntp_buf, sizeof(ntp_buf), "%u.%u.%u.%u", gw[0], gw[1], gw[2], gw[3]);
-            configTime(0, 0, ntp_buf, "0.pool.ntp.org");
-            // TODO remove after NTP Ubiqiti debug
-            ESP_LOGI("ntp", "NTP servers: %s, 0.pool.ntp.org", ntp_buf); 
-            if (!id(tz_text).state.empty()) {
-              id(ha_time).set_timezone(id(tz_text).state);
+          if (gw != IPAddress(0, 0, 0, 0) && time_is_stale) {
+            static char ntp_buf[20];          // NTP server, static as must persist to NTP client
+            static uint8_t step = 0;          // Cycle: gateway, 0.pool, 1.pool, 2.pool, 3.pool
+            if (step == 0) {
+              snprintf(ntp_buf, sizeof(ntp_buf), "%u.%u.%u.%u", gw[0], gw[1], gw[2], gw[3]);
+            } else {
+              snprintf(ntp_buf, sizeof(ntp_buf), "%u.pool.ntp.org", (unsigned) (step - 1));
             }
+            step = (step + 1) % 5;
+            configTime(0, 0, ntp_buf);
+            ESP_LOGI("ntp", "NTP server: %s", ntp_buf);
+            if (! id(tz_text).state.empty()) id(ha_time).set_timezone(id(tz_text).state);
           }
+          
 
   # Send one parameter to the group. The value is made here from the
   # parameter name, which is the uppercase ID.
@@ -1581,17 +1581,8 @@ interval:
           ESP_LOGD("sun", "time=%s valid=%d TZ='%s' lat=%.1f lon=%.1f elev=%.1f", time.strftime("%Y-%m-%d %H:%M:%S %z").c_str(),
             time.is_valid(), id(tz_text).state.c_str(), id(loc_lat).state, id(loc_lon).state,
             id(sun_sun).elevation());
-      # Every minute while WiFi is up but the clock is not valid: poll NTP again,
-      # instead of waiting for the normal 15 min interval
-      - if:
-          condition:
-            lambda: 'return WiFi.status() == WL_CONNECTED && !id(ha_time).now().is_valid();'
-          then:
-            - logger.log:  # TODO removed after NTP with Ubiqiti debug
-                format: "NTP retry, no clock yet"
-                level: INFO
-                tag: ntp
-            - component.update: ntp_time
+      # Every minute we check net_setup, which might adjust the NTP server based on time health
+      - script.execute: net_setup
       # Every minute: show the age of the last clock sync in the diagnostics
       - lambda: |-
           if (id(last_clock_sync_ms) == 0) {
