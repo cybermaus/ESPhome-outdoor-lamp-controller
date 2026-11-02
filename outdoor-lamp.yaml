@@ -95,15 +95,13 @@
 #   LAMPGROUP:<group>:<PARAMETER>:<value>;....<PARAMETER>:<value>;COMPLETE;
 #   LAMPGROUP:<group>:REQCONFIG;
 #   LAMPGROUP:<group>:RECONNECT;
+#   every request has a suffix:  PEER:<ip>,<label>,<mac>;
 #
-# The group name can not contain a colon. The value is everything after the
-# third colon (times have colons). The parameter is the uppercase ID of the
-# entity:
+# The value is therefore everything between the first : and ; and can contain a : itself
+# As parameer we use the uppercase ID of the entity:
 #   LAMP         1 / 0      the lamp state itself
 #   SENSOR       1 / 0      a daylight sensor somewhere in the group says dark
 #   MOTION       1 / 0      a motion sensor somewhere in the group says motion
-# (SENSOR and MOTION are a state: not part of the config dump LAMP is also a
-#  state, but is synced anyway to avoid the delay of the 1 minute update cycle )
 #   USE_SUN      1 / 0
 #   USE_SCHEDULE 1 / 0
 #   TWILIGHT     Normal / Half Civil / Civil
@@ -155,10 +153,6 @@
 # also refreshes the expiry on the others. LAMP and the actions are sent both,
 # so a LAMP that arrives from a sensor edge is harmless: an equal value is ignored.
 # 
-# TODO: the 5 minute repeat should only be driven from a local wall switch connected
-# device. When it was some HA automation drive, or WebUI drive, the repeat should be 
-# made by HA. In essense, HA should provide a keepalive to a MOTION or SENSOR state
-#
 # INFO:
 # "Twilight info" text sensor shows the next calculated sun_up / sun_down.
 # "Lamp schdule" text sensor shows the calculated on-off schedule
@@ -192,8 +186,7 @@
 #
 # PACKETS
 #   REQCONFIG   "Send me your config." Sent at once after a user changes the GROUP,
-#               and about 5 s after connecting when we were never before synced.
-#               or our sync is suspect.
+#               but with a slight delay for sync suspect devices
 #   RECONNECT   "I just (re)connected." Sent after boot or WiFi reconnect by a lamp
 #               that was synced before, but after a random 20-30 minute delay, so a site-wide
 #               power outage does not cause a request storm and also other network
@@ -204,13 +197,13 @@
 #
 # ANSWERING
 #   A lamp answers with all parameters, after a random 0-500 ms delay, but only
-#   when the device has group_synced status. An unsynced lamp stays quiet.
-#   A sync_is_suspect lamp answers only after 1 minute extra, and drops its answer
-#   if any other lamps answer first. This is so an isolated workbench lamp cannot poison
-#   the group with stale config when it is brought back into the field. The suspect lamp
+#   when the device has group_synced status. An unsynced lamp stays quiet.A sync suspect
+#   device waits an extra few seconds and drops its awnser if it sees others exists.
+#   This is so an isolated workbench lamp cannot poison the group with stale config when
+#   it is brought back into the field. The suspect lamp
 #   still answers a REQCONFIG immediately, as that the result of a operator action.
 #   This means that adding a 2nd lamp to an otherwise empty group is not annoyingly
-#   slow for the operator
+#   slow for the operator TODO: with the wait drop from 1 min to 2 seconds, this can be removed
 #
 # BECOMING SYNCED
 #   - When a COMPLETE packet was seen.
@@ -225,7 +218,7 @@
 packages:
   diagnostics: !include common/diagnostics.yaml
   # Pick one board. Pins, inversion and the platform block live there.
-  # board: !include common/board-shelly1-classic-2m.yaml
+  board: !include common/board-shelly1-classic-2m.yaml
   # board: !include common/board-esp12f-temperature-2m.yaml
   # board: !include common/board-sonoff-s20-1m.yaml
 
@@ -383,8 +376,6 @@ udp:
             if (millis() - id(last_req_ms) >= 2000) {
               if (!id(group_peers).state) id(group_peers).turn_on();
               if (id(group_synced).state) {
-                // Only a suspect lamp answers a RECONNECT slowly :
-                id(dump_slow) = (param == "RECONNECT") && id(sync_is_suspect);
                 id(group_dump).execute();
               }
             }
@@ -626,10 +617,6 @@ globals:
     initial_value: 'false'
   # Evaluated at boot: remembers synced but never saw peers. A lone device that may have moved.
   - id: sync_is_suspect
-    type: bool
-    initial_value: 'false'
-  # Set per received request: answer slowly (suspect lamp, RECONNECT)
-  - id: dump_slow
     type: bool
     initial_value: 'false'
   # Kind of request being sent: true = REQCONFIG, false = RECONNECT
@@ -1436,20 +1423,19 @@ script:
           if (id(req_fast)) {
             // User did a group change: network is up, ask immediate, as a REQCONFIG
             id(req_fast) = false;
-            id(send_reqconfig) = true;
-            return (uint32_t) 500;  // Tiny wait for double group on_value call
+            id(send_reqconfig) = true; // operator action! we want fast response
+            return (uint32_t) 500;     // Tiny wait for double group on_value call
           }
           if (!id(group_synced).state || id(sync_is_suspect)) {
             // Never synced (new device or new group): ask soon, as a REQCONFIG
             // or a former or real lone device : ask soon, as a REQCONFIG
-            id(send_reqconfig) = true;
-            return (uint32_t) 5000; // Allow 5 seconds for DHCP to finish
+            id(send_reqconfig) = true; // operator action? we want fast response
+            return (uint32_t) 5000;    // Allow 5 seconds for DHCP to finish
           }
-          id(send_reqconfig) = false;
           // Boot / reconnect, could be caused by side wide power failure :
           // so we stagger config requests between 20 to 30 minutes :
+          id(send_reqconfig) = false;  // No operator action? large wait, slow response
           return (uint32_t) (1200000 + random_uint32() % 600000);
- 
       - lambda: 'id(last_req_ms) = millis();'
       - if:
           condition:
@@ -1486,7 +1472,8 @@ script:
   - id: group_dump
     mode: restart
     then:
-      - delay: !lambda 'return (uint32_t) ((id(dump_slow) ? 60000 : 0) + random_uint32() % 500);'
+      # Suspect lamps answers slightly slower then lamps in good standing
+      - delay: !lambda 'return (uint32_t) (random_uint32() % 500 + (id(sync_is_suspect) ? 2000 : 0));'
       - script.execute:
           id: group_send
           param: "DUMP"
