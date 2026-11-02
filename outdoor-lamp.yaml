@@ -218,7 +218,7 @@
 packages:
   diagnostics: !include common/diagnostics.yaml
   # Pick one board. Pins, inversion and the platform block live there.
-  board: !include common/board-shelly1-classic-2m.yaml
+  # board: !include common/board-shelly1-classic-2m.yaml
   # board: !include common/board-esp12f-temperature-2m.yaml
   # board: !include common/board-sonoff-s20-1m.yaml
 
@@ -226,7 +226,7 @@ substitutions:
 # Substitutions like hardware pins from common/board-.....yaml added from packages
   devicename: outdoor-lamp
   description: Outdoor lamp controller.
-  prj_version: "2026.10.30"
+  prj_version: "2026.11.01"
 
   # Defaults compile locations, user can change them
 #  default_latitude:  "58.7" # Tiveden, SE
@@ -625,7 +625,7 @@ globals:
     initial_value: 'false'
 
   # The lamp was last driven by MOTION or SENSOR (not by the cycle)
-  - id: ms_driven
+  - id: sensor_driven
     type: bool
     initial_value: 'false'
   # millis() of a received MOTION/SENSOR on. 0 = off, or driven locally.
@@ -1173,7 +1173,7 @@ script:
           // MOTION: on while the sun is below the level. Overrides the pause.
           // Works without a clock: a missing clock must not disable a safety light.
           if (mot && (!time.is_valid() || id(sun_sun).elevation() < thr)) {
-            id(ms_driven) = true;
+            id(sensor_driven) = true;
             id(lamp_target) = 1;
             snprintf(buf, sizeof(buf), "Motion detected");
             id(lamp_info).publish_state(buf);
@@ -1184,11 +1184,11 @@ script:
           // Needs no clock.
           if (!sun && !scd) {
             if (sns) {
-              id(ms_driven) = true;
+              id(sensor_driven) = true;
               id(lamp_target) = 1;
               snprintf(buf, sizeof(buf), "Daylight sensor active");
-            } else if (id(ms_driven)) {
-              id(ms_driven) = false;     // released: back to off
+            } else if (id(sensor_driven)) {
+              id(sensor_driven) = false; // released: back to off
               id(lamp_target) = 0;
               snprintf(buf, sizeof(buf), "Manual switch only");
             } else {
@@ -1198,7 +1198,7 @@ script:
             id(lamp_info).publish_state(buf);
             return;
           }
-          id(ms_driven) = false;
+          id(sensor_driven) = false;
 
           // No valid clock; the cycle does nothing. Forget the applied state, so the:
           // next one counts as a first state and is not broadcast:
