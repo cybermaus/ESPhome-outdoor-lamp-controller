@@ -124,6 +124,7 @@
 #
 # - Read the section about sync strategy below for more details
 #
+#
 # INPUTS: SENSOR and MOTION actions versus the USE_SENSOR and USE_MOTION switches
 #
 # SENSOR and MOTION are actions (state). They can be set by HA, by the wall switch
@@ -148,11 +149,12 @@
 # When SENSOR or MOTION turns off, lamp_update runs and the lamp returns to
 # the state of the normal cycle.
 #
-# Stuck states: a received MOTION or SENSOR expires after 10 min. The lamp that
-# originated it repeats MOTION, SENSOR and LAMP every 5 min while it is on, which
-# also refreshes the expiry on the others. LAMP and the actions are sent both,
-# so a LAMP that arrives from a sensor edge is harmless: an equal value is ignored.
-# 
+# Lost input state: if the driving device fails, MOTION or SENSOR expires after
+# 10 min. Only a hardware wall input on the lamp itself never expires. Anything else
+# (a received packet, HA, the web UI) must repeat ON every 5 min as a keep-alive.
+# Two missed keep-alives turn the input off on the other lamps.
+#
+#
 # INFO:
 # "Twilight info" text sensor shows the next calculated sun_up / sun_down.
 # "Lamp schdule" text sensor shows the calculated on-off schedule
@@ -171,7 +173,6 @@
 # Subsequent packets are queued 20 ms apart
 # Purely local parameters are not sent: GROUP, LABEL, USE_SENSOR, USE_MOTION
 #
-# TODO The lamp itself: The first lamp state restore after wifi connect is not broadcast
 #
 # FLAGS
 #   group_synced    Remembered across reboots. "My config is current, I may
@@ -226,7 +227,7 @@ substitutions:
 # Substitutions like hardware pins from common/board-.....yaml added from packages
   devicename: outdoor-lamp
   description: Outdoor lamp controller.
-  prj_version: "2026.11.01"
+  prj_version: "2026.11.03"
 
   # Defaults compile locations, user can change them
 #  default_latitude:  "58.7" # Tiveden, SE
@@ -411,7 +412,7 @@ udp:
             }
             if (!on && id(motion_act).state) {
               // LAMP 0 from the group ends motion: motion off or operator override
-              id(motion_rx_ms) = 0;
+              id(motion_keepalive_ms) = 0;
               id(motion_act).turn_off();
             }
             
@@ -460,14 +461,14 @@ udp:
             
           } else if (param == "MOTION") {
             bool on = (v == "1");
-            id(motion_rx_ms) = on ? millis() : 0;
+            id(motion_keepalive_ms) = on ? millis() : 0;
             if (on != id(motion_act).state) {
               if (on) id(motion_act).turn_on(); else id(motion_act).turn_off();
             }
             
           } else if (param == "SENSOR") {
             bool on = (v == "1");
-            id(sensor_rx_ms) = on ? millis() : 0;
+            id(sensor_keepalive_ms) = on ? millis() : 0;
             if (on != id(sensor_act).state) {
               if (on) id(sensor_act).turn_on(); else id(sensor_act).turn_off();
             }
@@ -624,12 +625,10 @@ globals:
   - id: input_driven
     type: bool
     initial_value: 'false'
-  # millis() of a received MOTION/SENSOR on. 0 = off, or driven locally.
-  # A received one expires after 10 min unless refreshed.
-  - id: motion_rx_ms
+  - id: motion_keepalive_ms
     type: uint32_t
     initial_value: '0'
-  - id: sensor_rx_ms
+  - id: sensor_keepalive_ms
     type: uint32_t
     initial_value: '0'
 
@@ -724,14 +723,14 @@ switch:
     disabled_by_default: true
     turn_on_action:
       # SENSOR, when not driven locally by hardware, needs keepalive of a remote driver like HA
-      - lambda: 'id(sensor_rx_ms) = millis();'  # set keepalive timeout
+      - lambda: 'id(sensor_keepalive_ms) = millis();'  # set keepalive timeout
       - script.execute:
           id: group_send
           param: "SENSOR"
     on_turn_on:
       - script.execute: lamp_update
     on_turn_off:
-      - lambda: 'id(sensor_rx_ms) = 0;'         # disable keepalive timeout
+      - lambda: 'id(sensor_keepalive_ms) = 0;'         # disable keepalive timeout
       - script.execute: lamp_update
       - script.execute:
           id: group_send
@@ -751,14 +750,14 @@ switch:
     disabled_by_default: true
     turn_on_action:
       # MOTION, when not driven locally by hardware, needs keepalive of a remote driver like HA
-      - lambda: 'id(motion_rx_ms) = millis();' # set keepalive timeout
+      - lambda: 'id(motion_keepalive_ms) = millis();' # set keepalive timeout
       - script.execute:
           id: group_send
           param: "MOTION"
     on_turn_on:
       - script.execute: lamp_update
     on_turn_off:
-      - lambda: 'id(motion_rx_ms) = 0;'        # disable keepalive timeout
+      - lambda: 'id(motion_keepalive_ms) = 0;'        # disable keepalive timeout
       - script.execute:
           id: group_send
           param: "MOTION"
@@ -783,7 +782,7 @@ switch:
             binary_sensor.is_on: wall_switch
           then:
             - switch.turn_on: sensor_act
-            - lambda: 'id(sensor_rx_ms) = 0;'    # 0 indicates hardware origin
+            - lambda: 'id(sensor_keepalive_ms) = 0;'    # 0 indicates hardware origin
     on_turn_off:
       - switch.turn_off: sensor_act
     web_server:
@@ -806,7 +805,7 @@ switch:
             binary_sensor.is_on: wall_switch
           then:
             - switch.turn_on: motion_act
-            - lambda: 'id(sensor_rx_ms) = 0;'    # 0 indicates hardware origin
+            - lambda: 'id(sensor_keepalive_ms) = 0;'    # 0 indicates hardware origin
     on_turn_off:
       - switch.turn_off: motion_act
     web_server:
@@ -873,7 +872,7 @@ binary_sensor:
             // Wall input is a daylight sensor: SENSOR follows the input 
             if (x) {
               id(sensor_act).turn_on();
-              id(sensor_rx_ms) = 0;     // hardware origin: no expiry, repeated every 5 min
+              id(sensor_keepalive_ms) = 0;     // hardware origin: no expiry, repeated every 5 min
             } else {
               id(sensor_act).turn_off();
             }
@@ -881,7 +880,7 @@ binary_sensor:
             // Wall input is a motion sensor: MOTION follows the input
             if (x) {
               id(motion_act).turn_on();
-              id(motion_rx_ms) = 0;     // hardware origin: no expiry, repeated every 5 min
+              id(motion_keepalive_ms) = 0;     // hardware origin: no expiry, repeated every 5 min
             } else {
               id(motion_act).turn_off();
             }
@@ -1599,12 +1598,12 @@ interval:
       # it needs a keepalive from the source-device or from HA when set from HA
       - lambda: |-
           id(tx_mute) = true;
-          if (id(motion_rx_ms) && millis() - id(motion_rx_ms) > 660000) {
-            id(motion_rx_ms) = 0;
+          if (id(motion_keepalive_ms) && millis() - id(motion_keepalive_ms) > 601000) {
+            id(motion_keepalive_ms) = 0;
             id(motion_act).turn_off();
           }
-          if (id(sensor_rx_ms) && millis() - id(sensor_rx_ms) > 660000) {
-            id(sensor_rx_ms) = 0;
+          if (id(sensor_keepalive_ms) && millis() - id(sensor_keepalive_ms) > 601000) {
+            id(sensor_keepalive_ms) = 0;
             id(sensor_act).turn_off();
           }
           id(tx_mute) = false;
@@ -1616,7 +1615,7 @@ interval:
     then:
       - if:
           condition:
-            lambda: 'return (id(motion_act).state && id(motion_rx_ms) == 0) || (id(sensor_act).state && id(sensor_rx_ms) == 0);'
+            lambda: 'return (id(motion_act).state && id(motion_keepalive_ms) == 0) || (id(sensor_act).state && id(sensor_keepalive_ms) == 0);'
           then:
             - script.execute:
                 id: group_send
@@ -1624,7 +1623,7 @@ interval:
             - if:
                 #if MOTION originated here, then resend it every 5 minutes
                 condition:
-                  lambda: 'return id(motion_act).state && id(motion_rx_ms) == 0;'
+                  lambda: 'return id(motion_act).state && id(motion_keepalive_ms) == 0;'
                 then:
                   - script.execute:
                       id: group_send
@@ -1632,7 +1631,7 @@ interval:
             - if:
                 #if SENSOR originated here, then resend it every 5 minutes
                 condition:
-                  lambda: 'return id(sensor_act).state && id(sensor_rx_ms) == 0;'
+                  lambda: 'return id(sensor_act).state && id(sensor_keepalive_ms) == 0;'
                 then:
                   - script.execute:
                       id: group_send
@@ -1666,7 +1665,7 @@ button:
 
   - platform: template
     name: "_Group writeout peers"
-    id: peers_log_test
+    id: peers_log
     entity_category: diagnostic
     disabled_by_default: true
     internal: true # many diagnistics are not send to HA to minimize traffic
