@@ -1,0 +1,31 @@
+# Board: Shelly2.5 classic, ESP8266 with 2MB flash
+# It is a 2-input 2-relay 2-pm device, we only one pair for a clean outdoor lamp, and
+# the second output is hardcoded for the garage-light specialty device
+# maybe that will also have the PM stuff, why not.
+substitutions:
+  show_board:      Shelly25  # string shown in HA
+  GPIO_relay:      GPIO4     # relay 1
+  relay_inverted:  false
+  GPIO_wall_input: GPIO13    # wall switch 1 input
+  wall_inverted:   false
+  wall_pullup:     false
+  pushbutton:      "false"
+  GPIO_Status_LED: GPIO1     # LED (they claim it has one, I do not see it)
+  led_inverted:    true
+  led_platform:    esp8266_pwm
+  web_local:       false
+  
+  GPIO_relay2:     GPIO15    # relay 2
+  GPIO_wall2:      GPIO5     # wall switch 2
+# GPIO12	i2c SDA
+# GPIO14	i2c SCL
+# GPIO16	ADE7953 IRQ (power measurement)
+
+#esphome:
+#  platformio_options:
+#    board_upload.flash_size: 2MB
+#    board_build.ldscript: eagle.flash.2m64.ld
+
+esp8266:
+  board: esp01_1m
+  restore_from_flash: true

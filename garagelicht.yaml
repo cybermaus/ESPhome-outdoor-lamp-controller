@@ -1,0 +1,183 @@
+#######################################################################################
+# Garage Licht Controller
+#
+# This is a derived partner device to the outdoor-lamp project
+# it serves as a one-off for me, but should others use this, it is an example.
+#
+# Switch 1 + Relay 1 normal outdoor-lamp group broadcast and config
+# In my setup, it will have the pre-existing ambient daylight sensor connected
+#
+# Switch 2 + Relay 2 Garage light and the spring loaded push switch (pushbutton) 
+# also with power measurement, and auto switch off after 4 hours 
+# I put them in one device because a) I had an unused Shelly2.5 and b) they were 
+# already in the same wall box.
+#
+#######################################################################################
+
+packages:
+  outdoor-lamp: !include outdoor-lamp.yaml
+  diagnostics: !include common/diagnostics.yaml
+  # Pick one board. Pins, inversion and the platform block live there.
+  board: !include common/board-shelly2.5-classic-2m.yaml
+
+substitutions:
+# Substitutions like hardware pins from common/board-.....yaml added from packages
+  devicename: garagelicht
+  description: "Garage Licht Controller"
+  prj_version: "2026.11.03"
+  channel_1: Lamp
+  channel_2: Garage
+  max_power: "400.0"
+
+esphome:
+  name_add_mac_suffix: false # one off device
+
+web_server:
+  sorting_groups:
+    - id: sorting_group_garage
+      name: "Garage"
+      sorting_weight: -10    # On top of the screen
+
+#######################################################################################
+
+# I2C for the current sensor chip
+i2c:
+  sda: GPIO12
+  scl: GPIO14
+
+sensor:
+  - platform: ade7953_i2c
+    irq_pin: GPIO16 # Prevent overheating by setting this
+    # On the Shelly 2.5 channels are mixed ch1=B ch2=A
+    current_a:
+      name: ${channel_2} current
+      internal: true
+      disabled_by_default: true
+      icon: mdi:flash
+      web_server:
+        sorting_weight: 110
+        sorting_group_id: sorting_group_garage
+    current_b:
+      name: ${channel_1} current
+      internal: true
+      disabled_by_default: true
+      icon: mdi:flash
+    active_power_a:
+      name: ${channel_2} power
+      id: power_channel_2
+      icon: mdi:flash
+      disabled_by_default: true
+      filters:
+        - lambda: return -x;
+      web_server:
+        sorting_weight: 130
+        sorting_group_id: sorting_group_garage
+      on_value_range:
+        - above: ${max_power}
+          then:
+            - light.turn_off: garage_lamp_output
+            - homeassistant.service:
+                service: persistent_notification.create
+                data:
+                  title: Message from ${devicename}
+                data_template:
+                  message: Switch turned off because power exceeded ${max_power}W
+    active_power_b:
+      name: ${channel_1} power
+      id: power_channel_1
+      icon: mdi:flash
+      disabled_by_default: true
+      filters:
+        # active_power_b is inverted, so take the value * -1 or the absolute value
+        # this not the case for active_power_a
+        - lambda: return abs(x);
+      on_value_range:
+        - above: ${max_power}
+          then:
+            - light.turn_off: lamp_output
+            - homeassistant.service:
+                service: persistent_notification.create
+                data:
+                  title: Message from ${devicename}
+                data_template:
+                  message: Switch turned off because power exceeded ${max_power}W
+    update_interval: 30s
+
+
+# Both energy values are not stored. Instead they are given "ever increasing" 
+# in HA so a reset to 0 is handled there. Hence the name "daily" energy.
+  - platform: total_daily_energy
+    name: ${channel_1} energy
+    power_id: power_channel_1
+    filters:
+      # Multiplication factor from W to kWh is 0.001
+      - multiply: 0.001
+      - round_to_multiple_of: 0.001
+      - delta: 0.001
+    unit_of_measurement: kWh
+    device_class: energy
+    state_class: total_increasing
+    icon: mdi:lightning-bolt
+    restore: false
+
+  - platform: total_daily_energy
+    name: ${channel_2} energy
+    power_id: power_channel_2
+    filters:
+      # Multiplication factor from W to kWh is 0.001
+      - multiply: 0.001
+      - round_to_multiple_of: 0.001
+      - delta: 0.001
+    unit_of_measurement: kWh
+    device_class: energy
+    state_class: total_increasing
+    icon: mdi:lightning-bolt
+    restore: false
+    web_server:
+      sorting_weight: 120
+      sorting_group_id: sorting_group_garage
+
+# The simple relay/switch/light combo for the extra garage lamp
+output:
+  - platform: gpio
+    pin: ${GPIO_relay2}
+    id: garage_relay_output
+light:
+  - platform: binary
+    name: "Garage lamp"
+    output: garage_relay_output
+    id: garage_lamp_output
+    icon: mdi:lightbulb-outline
+    on_turn_on:
+      - script.execute: garage_autooff
+    web_server:
+      sorting_weight: 100
+      sorting_group_id: sorting_group_garage
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: ${GPIO_wall2}
+      mode:
+        input: true
+        pullup: ${wall_pullup}
+      inverted: ${wall_inverted}
+    name: "${channel_2} switch"
+    icon: mdi:lightbulb-outline
+    id: garage_wall_switch
+    internal: true
+    disabled_by_default: true
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    web_server:
+      sorting_weight: 140
+      sorting_group_id: sorting_group_garage
+    on_press: # it has a pushbutton style switch
+      then:
+        - light.toggle: garage_lamp_output
+script:
+  - id: garage_autooff
+    mode: restart
+    then:
+      - delay: 4h
+      - light.turn_off: garage_lamp_output
