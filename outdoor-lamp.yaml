@@ -621,7 +621,7 @@ globals:
     initial_value: 'false'
 
   # The lamp was last driven by MOTION or SENSOR (not by the cycle)
-  - id: sensor_driven
+  - id: input_driven
     type: bool
     initial_value: 'false'
   # millis() of a received MOTION/SENSOR on. 0 = off, or driven locally.
@@ -1169,7 +1169,7 @@ script:
           // MOTION: on while the sun is below the level. Overrides the pause.
           // Works without a clock: a missing clock must not disable a safety light.
           if (mot && (!time.is_valid() || id(sun_sun).elevation() < thr)) {
-            id(sensor_driven) = true;
+            id(input_driven) = true;
             id(lamp_target) = 1;
             return;
           }
@@ -1179,10 +1179,10 @@ script:
           if (!sun && !scd) {
             snprintf(buf, sizeof(buf), "Manual switch only");
             if (sns) {
-              id(sensor_driven) = true;
+              id(input_driven) = true;
               id(lamp_target) = 1;
-            } else if (id(sensor_driven)) {
-              id(sensor_driven) = false; // released: back to off
+            } else if (id(input_driven)) {
+              id(input_driven) = false; // released: back to off
               id(lamp_target) = 0;
             } else {
               id(lamp_applied) = -1;     // forget, next one is a first state
@@ -1190,16 +1190,23 @@ script:
             id(lamp_info).publish_state(buf);
             return;
           }
-          id(sensor_driven) = false;
 
-          // No valid clock; the cycle does nothing. Forget the applied state, so the:
-          // next one counts as a first state and is not broadcast:
-          if (!time.is_valid()) {
-            snprintf(buf, sizeof(buf), "No valid clock, manual only");
-            id(lamp_applied) = -1;
-            id(lamp_info).publish_state(buf);
+          // No valid clock: the cycle does nothing, but SENSOR and MOTION still work.
+          // Forget the applied state, so the next one counts as a first state and is not broadcast:
+          if (! time.is_valid()) {
+            id(lamp_info).publish_state("No valid clock, manual only");
+            if (sns) {
+              id(input_driven) = true;
+              id(lamp_target) = 1;
+            } else if (id(input_driven)) {
+              id(input_driven) = false;  // released: back to off
+              id(lamp_target) = 0;
+            } else {
+              id(lamp_applied) = -1;
+            }
             return;
           }
+          id(input_driven) = false;
 
           // Sun and/or Schedule active and a valid time: process the cycle
           int m   = time.hour * 60 + time.minute;
