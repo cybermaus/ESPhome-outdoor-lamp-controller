@@ -9,6 +9,7 @@ substitutions:
   pushbutton:      "false"
   GPIO_Status_LED: GPIO2     # shelly-1 does not have one, pick any
   led_inverted:    true
+  led_platform:    esp8266_pwm
   web_local:       false
   
 esphome:

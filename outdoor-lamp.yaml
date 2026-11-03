@@ -638,12 +638,11 @@ output:
     pin: ${GPIO_relay}
     id: relay_output
     inverted: ${relay_inverted}
-  - platform: gpio
+  - platform: ${led_platform}
     pin:
       number: ${GPIO_Status_LED}
       inverted: ${led_inverted}
-    id: led_output
-    
+    id: led_output    
   
 light:
   # The lamp. Switched by the cycle, the group, the wall switch and HA.
@@ -966,6 +965,20 @@ number:
             id: group_send
             param: "LOC_LON"
 
+  # LED brightness settable for when it is annoyingly in view
+  - platform: template
+    name: "_LED brightness"
+    id: led_level
+    entity_category: diagnostic
+    disabled_by_default: true
+    internal: true
+    optimistic: true
+    restore_value: true
+    initial_value: 10
+    min_value: 0
+    max_value: 10
+    step: 1
+    mode: slider
 
 text:
   # Short memorable unique user assigned name, potentially 
@@ -1573,8 +1586,10 @@ interval:
   # Every 10 seconds blink the LED for 0.1 s: visual "still running"
   - interval: 10seconds
     then:
-      - output.turn_on: led_output
-      - delay: 0.1s
+      - output.set_level:
+          id: led_output
+          level: !lambda 'return id(led_level).state / 10.0;'
+      - delay: 0.2s
       - output.turn_off: led_output
 
   # Every minute re-evaluate the cycle

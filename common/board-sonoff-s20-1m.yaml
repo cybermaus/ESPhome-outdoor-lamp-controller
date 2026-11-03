@@ -10,6 +10,7 @@ substitutions:
   pushbutton:      "true"
   GPIO_Status_LED: GPIO13     # RED is hardlinked to relay, this is the blue led
   led_inverted:    true
+  led_platform:    esp8266_pwm
   web_local:       false
 
 #esphome:

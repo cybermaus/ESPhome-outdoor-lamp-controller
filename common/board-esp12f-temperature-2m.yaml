@@ -4,11 +4,12 @@ substitutions:
   GPIO_relay:      GPIO4     # relay driven by a FET
   relay_inverted:  true
   GPIO_wall_input: GPIO5
-  wall_inverted:   false
+  wall_inverted:   true
   wall_pullup:     false
   pushbutton:      "false"
   GPIO_Status_LED: GPIO2     # built-in LED
   led_inverted:    true
+  led_platform:    esp8266_pwm
   web_local:       false
 
 esphome:
