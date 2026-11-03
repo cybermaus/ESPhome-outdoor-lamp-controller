@@ -1170,6 +1170,9 @@ script:
           if (mot && (!time.is_valid() || id(sun_sun).elevation() < thr)) {
             id(input_driven) = true;
             id(lamp_target) = 1;
+            // The wall switch may have turned the lamp off behind the cycle's back,
+            // so forget the applied state and the apply step sees a change:
+            if (! id(lamp_output).remote_values.is_on()) id(lamp_applied) = 0;
             return;
           }
 
