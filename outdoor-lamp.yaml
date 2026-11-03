@@ -804,7 +804,7 @@ switch:
             binary_sensor.is_on: wall_switch
           then:
             - switch.turn_on: motion_act
-            - lambda: 'id(sensor_keepalive_ms) = 0;'    # 0 indicates hardware origin
+            - lambda: 'id(motion_keepalive_ms) = 0;'    # 0 indicates hardware origin
     on_turn_off:
       - switch.turn_off: motion_act
     web_server:
@@ -858,6 +858,7 @@ binary_sensor:
         input: true
         pullup: ${wall_pullup}
       inverted: ${wall_inverted}
+    name: "Switch Input"
     id: wall_switch
     internal: true
     disabled_by_default: true
@@ -1437,6 +1438,14 @@ script:
     mode: restart
     then:
       - lambda: 'id(group_live) = true;'
+      - if:
+          condition:
+            lambda: 'return id(group_synced).state && ! id(sync_is_suspect) && ! id(device_group).state.empty();'
+          then:
+            - delay: !lambda 'return (uint32_t) (2000 + random_uint32() % 5000);'
+            - script.execute:
+                id: udp_tx
+                msg: !lambda 'return "LAMPGROUP:" + id(device_group).state + ":HELLO;";'
       - delay: !lambda |-
           if (id(req_fast)) {
             // User did a group change: network is up, ask immediate, as a REQCONFIG
@@ -1688,6 +1697,13 @@ button:
     disabled_by_default: true
     internal: true # many diagnistics are not send to HA to minimize traffic
     on_press:
+      - if:
+          condition:
+            lambda: 'return ! id(device_group).state.empty();'
+          then:
+            - script.execute:
+                id: udp_tx
+                msg: !lambda 'return "LAMPGROUP:" + id(device_group).state + ":HELLO;";'
       - lambda: |-
           ESP_LOGI("peers", "--- peers seen: %d ---", (int) id(peers).size());
           for (auto &q : id(peers)) {
