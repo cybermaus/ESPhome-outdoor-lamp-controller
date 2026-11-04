@@ -20,7 +20,7 @@ and show up in Home Assistant. Change a setting on one lamp and the whole group 
 the group, and the others follow virtually instantly so they visually appear as a single wired lamp chain. A lamp reconnecting to bad WiFi asks
 the group what is going on in case it missed any configuration updates. 
 
-It also works far up north, where sunset is sometimes part midnight, and evening twilight merges into morning twilight. It should even work
+It also works far up north, where sunset is sometimes past midnight, and evening twilight merges into morning twilight. It should even work
 above the polar circle, but that has only been tested in lab conditions. 
 
 ### Main controlling modes
@@ -143,8 +143,8 @@ The timezone is a POSIX string, not a name. Examples:
 | UTC | `UTC0` |
 | `blanks` | timezone and location are reset with example |
 
-The time comes from Home Assistant or from NTP. On every WiFi cycles through the DHCP gateway and internet pool servers for NTP
-Without a valid clock the cycle does nothing but the wall switch and any hardware input sensors keep working
+The time comes from Home Assistant or from NTP. If the clock is stale (without recent updates) the NTP rotates through the DHCP gateway and internet pool servers.
+Without a valid clock the lamp cycle does nothing but the wall switch and any hardware input sensors keep working
 
 **Sun levels.**
 
