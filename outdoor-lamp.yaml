@@ -258,13 +258,19 @@ esphome:
     priority: -100
     then:
       - lambda: 'id(sync_is_suspect) = !id(group_has_peers) && id(group_is_synced);'
+      - lambda: 'id(boot_done) = true;' 
       - script.execute: lamp_update
+
+# keeping close track on the flash writes, we also always write them to the logger
+#preferences:
+#  flash_write_interval: 5min
 
 logger:
   level: DEBUG
   initial_level: INFO
   logs:
-    status_led: NONE
+    status_led: NONE   # is just taking up space
+    preferences: DEBUG # I want to see the 'Saved' message
 
 #debug:
 #  update_interval: 10s
@@ -625,6 +631,10 @@ globals:
   - id: sync_is_suspect
     type: bool
     restore_value: no
+    initial_value: 'false'
+  # Turns out restored globals are restored first and need to be guarded
+  - id: boot_done
+    type: bool
     initial_value: 'false'
 
   # Kind of request being sent: true = REQCONFIG, false = RECONNECT
@@ -1052,11 +1062,13 @@ text:
     on_value:
       then:
         - lambda: |-
-            id(group_is_synced) = false;
-            id(group_has_peers) = false;
-            id(sync_is_suspect) = false;
-            id(req_fast) = true;
-            id(peers).clear();
+            if (id(boot_done)) {
+              id(group_is_synced) = false;
+              id(group_has_peers) = false;
+              id(sync_is_suspect) = false;
+              id(req_fast) = true;
+              id(peers).clear();
+            }
         # Hostname-safe: letters, digits, inner dashes, capitals ignored.
         - lambda: |-
             std::string h;
