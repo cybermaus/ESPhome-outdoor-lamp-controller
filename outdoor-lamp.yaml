@@ -227,7 +227,7 @@ substitutions:
 # Substitutions like hardware pins from common/board-.....yaml added from packages
   devicename: outdoor-lamp
   description: Outdoor lamp controller.
-  prj_version: "2026.11.03"
+  prj_version: "2026.11.04"
 
   # Defaults compile locations, user can change them
 #  default_latitude:  "58.7" # Tiveden, SE
@@ -395,6 +395,10 @@ udp:
           // Others are answering: Device is not alone and a pending slow dump is not needed 
           if (id(sync_is_suspect) && id(group_dump).is_running()) id(group_dump).stop();
 
+          // A SUSPECT set is only accepted by lamps that are not in good standing themselves :
+          if (body.find("SUSPECT;") != std::string::npos && id(group_is_synced) && ! id(sync_is_suspect)) {
+            return;
+          }
 
           // Apply one NAME / value pair. The caller below sets tx_mute (not sent on again) :
           // and cfg_hold (no cycle evaluation on half a config) :
@@ -511,7 +515,7 @@ udp:
           while ((semi = body.find(';', pos)) != std::string::npos) {
             std::string item = body.substr(pos, semi - pos);
             pos = semi + 1;
-            if (item == "COMPLETE") {
+            if (item == "COMPLETE" || item == "SUSPECT") {
               complete = true;
               continue;
             }
@@ -1436,7 +1440,7 @@ script:
                     msg += value_of(names[i]);
                     msg += ";";
                   }
-                  msg += "COMPLETE;";
+                  msg += id(sync_is_suspect) ? "SUSPECT;" : "COMPLETE;";
                 } else {
                   msg = param + ":" + value_of(param) + ";";
 
