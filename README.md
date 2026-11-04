@@ -21,7 +21,7 @@ the group, and the others follow virtually instantly so they visually appear as 
 the group what is going on in case it missed any configuration updates. 
 
 It also works far up north, where sunset is sometimes part midnight, and evening twilight merges into morning twilight. It should even work
-above the polar cicle, but that has only been tested in lab conditions. 
+above the polar circle, but that has only been tested in lab conditions. 
 
 ### Main controlling modes
 
@@ -77,7 +77,7 @@ Any manually switched state stays until the next sun or schedule cycle update.
 
 For now, only ESP8266, but soon will add ESP32, as I need those myself.
 Select the correct `common/board...` file, or create one based on the example of the others. You need uncomment or add your
-board to the main `outdoor-lamp.yaml`  in the `projects:` component
+board to the main `outdoor-lamp.yaml`  in the `packages:` component
 
 At the very least you need a device with a relay, so pretty much any ESP based smart switch will work. If you have no input
 switch or LED, just assign any unused GPIO.
@@ -100,7 +100,7 @@ But advised is you set or consider at least these:
 ### Entities that have the working state
 
 These hold state information for HA, and can also be driven from HA or the user directly.
-Any user change is also send to the group
+Any user change is also sent to the group
 
 | Entity | What it does |
 |---|---|
@@ -127,7 +127,7 @@ Unless you want to geek out.
 | _Debug Log | Set logging to DEBUG |
 | _LED Brightness | Makes the LED, if any, less bright |
 | _Group has peers | Device is not alone. A device that is alone is slightly hesitant before sending configuration out <br>To reset, change the group to a temp name and back |
-| _Group has synced | Config settings were exchanged with others, or if alone, assumed to be correct <br>To reset, change the group to a temp name and back |
+| _Group synced | Config settings were exchanged with others, or if alone, assumed to be correct <br>To reset, change the group to a temp name and back |
 | _<Diagnostics> | Lots of additional diagnostics, not sent to HA, so no network burden |
 
 ### Setting up location and time
@@ -210,7 +210,7 @@ only one device so they will all respond.
 
 ### Reboot and recovery
 
-Because the clock is so important, unlike normal ESPHome, it does not reboot when it looses connectivity. If you simply wait for it to come back, you may wait a long time. But it does reboot... eventually
+Because the clock is so important, unlike normal ESPHome, it does not reboot when it loses connectivity. If you simply wait for it to come back, you may wait a long time. But it does reboot... eventually
 
 - If there *is* a valid clock, it does not reboot for 30 days! However it does restart the wifi radio every day at about 13h00 to potentially unstuck it and rescan for strongest AP. (the normal AP rescan is disabled for reasons of UDP packet stability)
 - If there is a valid clock, and the clock is regularly resynced with NTP or HA, it never reboots.
