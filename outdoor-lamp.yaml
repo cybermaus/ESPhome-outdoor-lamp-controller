@@ -175,9 +175,9 @@
 #
 #
 # FLAGS
-#   group_synced    Remembered across reboots. "My config is current, I may
+#   group_is_synced Remembered across reboots. "My config is current, I may
 #                   answer other lamps."
-#   group_peers     Remembered across reboots. "I have seen other lamps in
+#   group_has_peers Remembered across reboots. "I have seen other lamps in
 #                   my group." Set by any received packet from the group.
 #   sync_is_suspect Evaluated at boot, not remembered: "I claim to be synced
 #                   merely because I never saw peers?"
@@ -198,7 +198,7 @@
 #
 # ANSWERING
 #   A lamp answers with all parameters, after a random 0-500 ms delay, but only
-#   when the device has group_synced status. An unsynced lamp stays quiet.A sync suspect
+#   when the device has group_is_synced status. An unsynced lamp stays quiet.A sync suspect
 #   device waits an extra few seconds and drops its awnser if it sees others exists.
 #   This is so an isolated workbench lamp cannot poison the group with stale config when
 #   it is brought back into the field. The suspect lamp
@@ -257,7 +257,7 @@ esphome:
   on_boot:
     priority: -100
     then:
-      - lambda: 'id(sync_is_suspect) = !id(group_peers).state && id(group_synced).state;'
+      - lambda: 'id(sync_is_suspect) = !id(group_has_peers) && id(group_is_synced);'
       - script.execute: lamp_update
 
 logger:
@@ -375,8 +375,8 @@ udp:
           if (param == "REQCONFIG" || param == "RECONNECT") {
             // For 2 seconds, ignore as likely our own request coming back as an echo :
             if (millis() - id(last_req_ms) >= 2000) {
-              if (!id(group_peers).state) id(group_peers).turn_on();
-              if (id(group_synced).state) {
+              id(group_has_peers) = true;
+              if (id(group_is_synced)) {
                 id(group_dump).execute();
               }
             }
@@ -385,7 +385,7 @@ udp:
 
 
           // Any other packet from our group proves a peer exists :
-          if (!id(group_peers).state) id(group_peers).turn_on();
+          id(group_has_peers) = true;
           // Others are answering: Device is not alone and a pending slow dump is not needed 
           if (id(sync_is_suspect) && id(group_dump).is_running()) id(group_dump).stop();
 
@@ -520,7 +520,7 @@ udp:
           // COMPLETE; ends a full config dump: we have the full set
           if (complete) {
             id(sync_is_suspect) = false;
-            id(group_synced).turn_on();
+            id(group_is_synced) = true;
             id(group_live) = true;
             id(group_request).stop();
             ESP_LOGD("udp", "in: COMPLETE set seen");
@@ -612,10 +612,21 @@ globals:
   - id: req_fast
     type: bool
     initial_value: 'false'
-  # Evaluated at boot: remembers synced but never saw peers. A lone device that may have moved.
+
+  # Group has peers, has synced and sync_is_suspect work together 
+  - id: group_is_synced
+    type: bool
+    restore_value: yes
+    initial_value: 'false'
+  - id: group_has_peers
+    type: bool
+    restore_value: yes
+    initial_value: 'false'
   - id: sync_is_suspect
     type: bool
+    restore_value: no
     initial_value: 'false'
+
   # Kind of request being sent: true = REQCONFIG, false = RECONNECT
   - id: send_reqconfig
     type: bool
@@ -810,27 +821,7 @@ switch:
     web_server:
       sorting_weight: 254
 
-
-  # Remembered. "My config is current, I may answer." Cleared by a user group change.
-  - platform: template
-    name: "_Group synced"
-    id: group_synced
-    entity_category: diagnostic
-    disabled_by_default: true
-    internal: true # many diagnistics are not send to HA to minimize traffic
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_OFF
-
-  # Remembered. "I have seen another lamp in my group." Cleared by a user group change.
-  - platform: template
-    name: "_Group has peers"
-    id: group_peers
-    entity_category: diagnostic
-    disabled_by_default: true
-    internal: true # many diagnistics are not send to HA to minimize traffic
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_OFF
-    
+   
   # Dynamic activation of debug messages
   - platform: template
     name: "_Debug log"
@@ -891,6 +882,33 @@ binary_sensor:
               id(lamp_output).toggle().perform();
             }
           }         
+
+  # Remembered. "I have seen another lamp in my group." Cleared by a group change.
+  - platform: template
+    name: "_Group has peers"
+    # id: group_has_peers
+    entity_category: diagnostic
+    disabled_by_default: true
+    internal: true # many diagnistics are not send to HA to minimize traffic
+    lambda: return id(group_has_peers);
+
+  # Remembered. "My config is current, I may answer." Cleared by a group change.
+  - platform: template
+    name: "_Group synced"
+    # id: group_is_synced
+    entity_category: diagnostic
+    disabled_by_default: true
+    internal: true # many diagnistics are not send to HA to minimize traffic
+    lambda: return id(group_is_synced);
+
+  # Not remembered. "My config is suspect, Cleared by a full sync
+  - platform: template
+    name: "_Group sync is suspect"
+    # id: sync_is_suspect
+    entity_category: diagnostic
+    disabled_by_default: true
+    internal: true # many diagnistics are not send to HA to minimize traffic
+    lambda: return id(sync_is_suspect);
 
 select:
   # What counts as sun up / down
@@ -1033,9 +1051,9 @@ text:
       sorting_weight: 120
     on_value:
       then:
-        - switch.turn_off: group_synced
-        - switch.turn_off: group_peers
         - lambda: |-
+            id(group_is_synced) = false;
+            id(group_has_peers) = false;
             id(sync_is_suspect) = false;
             id(req_fast) = true;
             id(peers).clear();
@@ -1440,7 +1458,7 @@ script:
       - lambda: 'id(group_live) = true;'
       - if:
           condition:
-            lambda: 'return id(group_synced).state && ! id(sync_is_suspect) && ! id(device_group).state.empty();'
+            lambda: 'return id(group_is_synced) && ! id(sync_is_suspect) && ! id(device_group).state.empty();'
           then:
             - delay: !lambda 'return (uint32_t) (2000 + random_uint32() % 5000);'
             - script.execute:
@@ -1453,7 +1471,7 @@ script:
             id(send_reqconfig) = true; // operator action! we want fast response
             return (uint32_t) 500;     // Tiny wait for double group on_value call
           }
-          if (!id(group_synced).state || id(sync_is_suspect)) {
+          if (!id(group_is_synced) || id(sync_is_suspect)) {
             // Never synced (new device or new group): ask soon, as a REQCONFIG
             // or a former or real lone device : ask soon, as a REQCONFIG
             id(send_reqconfig) = true; // operator action? we want fast response
@@ -1475,10 +1493,10 @@ script:
       # Nothing from our group arrived: we are alone, so we assume we are synced.
       - if:
           condition:
-            lambda: 'return !id(group_peers).state;'
+            lambda: 'return !id(group_has_peers);'
           then:
+            - lambda: 'id(group_is_synced) = true;'
             - lambda: 'id(sync_is_suspect) = true;'
-            - switch.turn_on: group_synced
       # No full set yet: so we keep asking in a while loop
       # note the while is infinite, but the UDP receive simply cancels this script to end
       - while:
