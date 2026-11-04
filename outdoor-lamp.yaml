@@ -91,10 +91,13 @@
 # GROUP: All devices have a groupname, and all in the same GROUP sync themselves.
 # They sync lamp state and config over UDP with plain text packet.
 #
-#   LAMPGROUP:<group>:<PARAMETER>:<value>;
+#   LAMPGROUP:<group>:<PARAMETER>;
+#   LAMPGROUP:<group>:<PARAMETER>:<value>;....<PARAMETER>:<value>;
 #   LAMPGROUP:<group>:<PARAMETER>:<value>;....<PARAMETER>:<value>;COMPLETE;
+#   LAMPGROUP:<group>:<PARAMETER>:<value>;....<PARAMETER>:<value>;SUSPECT;
 #   LAMPGROUP:<group>:REQCONFIG;
 #   LAMPGROUP:<group>:RECONNECT;
+#   LAMPGROUP:<group>:HELLO;
 #   every request has a suffix:  PEER:<ip>,<label>,<mac>;
 #
 # The value is therefore everything between the first : and ; and can contain a : itself
@@ -186,28 +189,24 @@
 #   All of the 3 above flags are cleared when user enters a new GROUP name
 #
 # PACKETS
-#   REQCONFIG   "Send me your config." Sent at once after a user changes the GROUP,
-#               but with a slight delay for sync suspect devices
-#   RECONNECT   "I just (re)connected." Sent after boot or WiFi reconnect by a lamp
-#               that was synced before, but after a random 20-30 minute delay, so a site-wide
-#               power outage does not cause a request storm and also other network
+#   REQCONFIG   "Send me your config." Sent at once after a user changes the GROUP
+#   HELLO       "I just (re)connected." Sent early after boot or WiFi reconnect by a lamp.
+#   RECONNECT   "I just (re)connected." Sent late after boot or WiFi reconnect by a lamp.
+#               Late, so a power outage does not cause a request storm and also other network
 #               infrastructure can boot first.
-#               As config rarely changes, working with 20-30 minute stale config is
-#               acceptable as long as it is not send out.
-#   Both are answered with a staggered but fast configuration dump by all synced devices
+#   All are send and answered with a staggered delay to avoid collisions and storms
 #
 # ANSWERING
-#   A lamp answers with all parameters, after a random 0-500 ms delay, but only
-#   when the device has group_is_synced status. An unsynced lamp stays quiet.A sync suspect
-#   device waits an extra few seconds and drops its awnser if it sees others exists.
-#   This is so an isolated workbench lamp cannot poison the group with stale config when
-#   it is brought back into the field. The suspect lamp
-#   still answers a REQCONFIG immediately, as that the result of a operator action.
-#   This means that adding a 2nd lamp to an otherwise empty group is not annoyingly
-#   slow for the operator TODO: with the wait drop from 1 min to 2 seconds, this can be removed
+#   A lamp answers REQCONFIG and RECONNECT with all parameters, but only when synced. 
+#   Unsynced lamps stays quiet. A sync_is_suspect device waits an extra few seconds and drops
+#   its awnser if it sees awnsers from upstanding devices. 
+#
+# SUSPECT
+#   A suspect lamp, as mentioned, does awnser, but marks its packet SUSPECT, and upstanding 
+#   devices lamps ignore that packet. Two suspect devices in a pair do validate each other.
 #
 # BECOMING SYNCED
-#   - When a COMPLETE packet was seen.
+#   - When a COMPLETE or SUSPECT packet was seen, but SUSPECT only when not already synced before
 #   - If 10 s after our own REQCONFIG nothing from our group arrived and we never seen
 #     any peers, we are alone, so we declare ourselves synced, but suspect
 #   - If any packet arrived, we have peers, so only the full set will make us synced.
@@ -396,6 +395,7 @@ udp:
           if (id(sync_is_suspect) && id(group_dump).is_running()) id(group_dump).stop();
 
           // A SUSPECT set is only accepted by lamps that are not in good standing themselves :
+          // this early return also ensures SUSPECT packets do not cancel a pending COMPLETE reply :
           if (body.find("SUSPECT;") != std::string::npos && id(group_is_synced) && ! id(sync_is_suspect)) {
             return;
           }
