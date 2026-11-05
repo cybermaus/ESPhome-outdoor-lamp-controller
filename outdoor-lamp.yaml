@@ -91,12 +91,11 @@
 # GROUP: All devices have a groupname, and all in the same GROUP sync themselves.
 # They sync lamp state and config over UDP with plain text packet.
 #
-#   LAMPGROUP:<group>:<PARAMETER>;
+#   LAMPGROUP:<group>:<PARAMETER>:<value>;
 #   LAMPGROUP:<group>:<PARAMETER>:<value>;....<PARAMETER>:<value>;
 #   LAMPGROUP:<group>:<PARAMETER>:<value>;....<PARAMETER>:<value>;COMPLETE;
 #   LAMPGROUP:<group>:<PARAMETER>:<value>;....<PARAMETER>:<value>;SUSPECT;
 #   LAMPGROUP:<group>:REQCONFIG;
-#   LAMPGROUP:<group>:RECONNECT;
 #   LAMPGROUP:<group>:HELLO;
 #   every request has a suffix:  PEER:<ip>,<label>,<mac>;
 #
@@ -189,28 +188,27 @@
 #   All of the 3 above flags are cleared when user enters a new GROUP name
 #
 # PACKETS
-#   REQCONFIG   "Send me your config." Sent at once after a user changes the GROUP
-#   HELLO       "I just (re)connected." Sent early after boot or WiFi reconnect by a lamp.
-#   RECONNECT   "I just (re)connected." Sent late after boot or WiFi reconnect by a lamp.
-#               Late, so a power outage does not cause a request storm and also other network
-#               infrastructure can boot first.
+#   REQCONFIG   "Send me your config." 
+#   HELLO       "I just (re)connected." Sent early after boot or WiFi reconnect by a lamp
+#               because the request will be send late and staggered to deal with a 
+#               potential full site power outage: wait for network to come
 #   All are send and answered with a staggered delay to avoid collisions and storms
 #
 # ANSWERING
-#   A lamp answers REQCONFIG and RECONNECT with all parameters, but only when synced. 
-#   Unsynced lamps stays quiet. A sync_is_suspect device waits an extra few seconds and drops
-#   its awnser if it sees awnsers from upstanding devices. 
+#   Synced lamps answers REQCONFIG with all parameters. A sync_is_suspect device waits
+#   an extra few seconds and drops its awnser if it sees awnsers from upstanding devices. 
 #
 # SUSPECT
 #   A suspect lamp, as mentioned, does awnser, but marks its packet SUSPECT, and upstanding 
-#   devices lamps ignore that packet. Two suspect devices in a pair do validate each other.
+#   devices lamps ignore that packet. Two suspect devices in a pair do validate each other,
+#   so bringing two lone lamps together will make them pair up and drop their suspect flags.
 #
 # BECOMING SYNCED
 #   - When a COMPLETE or SUSPECT packet was seen, but SUSPECT only when not already synced before
 #   - If 10 s after our own REQCONFIG nothing from our group arrived and we never seen
 #     any peers, we are alone, so we declare ourselves synced, but suspect
-#   - If any packet arrived, we have peers, so only the full set will make us synced.
-#   - A lamp that requested config but did not get a COMPLETE packet, it repeats the request
+#   - If any packet arrives (ignoring echo) we have peers
+#   - If a lamp requested config but did not get a COMPLETE packet it repeats the request
 #
 
 #######################################################################################
@@ -347,8 +345,7 @@ udp:
           // Everything after the group is a series of items, each ended by ';':
           //   NAME;   or   NAME:value;   Only ended items count, a cut packet is ignored.
           std::string body = s.substr(g_end + 1);
-          std::string param = body.compare(0, 10, "REQCONFIG;") == 0 ? "REQCONFIG"
-                            : body.compare(0, 10, "RECONNECT;") == 0 ? "RECONNECT" : "";
+          std::string param = body.compare(0, 10, "REQCONFIG;") == 0 ? "REQCONFIG" : "";
 
           // PEER:<ip>,<label>,<mac>; keep a table of peers, deduped on the MAC :
           size_t pp = body.find("PEER:");
@@ -377,7 +374,7 @@ udp:
             }
           }
 
-          if (param == "REQCONFIG" || param == "RECONNECT") {
+          if (param == "REQCONFIG") {
             // For 2 seconds, ignore as likely our own request coming back as an echo :
             if (millis() - id(last_req_ms) >= 2000) {
               id(group_has_peers) = true;
@@ -638,11 +635,6 @@ globals:
     initial_value: 'false'
   # Turns out restored globals are restored first and need to be guarded
   - id: boot_done
-    type: bool
-    initial_value: 'false'
-
-  # Kind of request being sent: true = REQCONFIG, false = RECONNECT
-  - id: send_reqconfig
     type: bool
     initial_value: 'false'
 
@@ -1482,20 +1474,17 @@ script:
                 msg: !lambda 'return "LAMPGROUP:" + id(device_group).state + ":HELLO;";'
       - delay: !lambda |-
           if (id(req_fast)) {
-            // User did a group change: network is up, ask immediate, as a REQCONFIG
+            // User did a group change: network is up, ask immediate
             id(req_fast) = false;
-            id(send_reqconfig) = true; // operator action! we want fast response
             return (uint32_t) 500;     // Tiny wait for double group on_value call
           }
           if (!id(group_is_synced) || id(sync_is_suspect)) {
-            // Never synced (new device or new group): ask soon, as a REQCONFIG
-            // or a former or real lone device : ask soon, as a REQCONFIG
-            id(send_reqconfig) = true; // operator action? we want fast response
+            // Never synced (new device or new group): ask soon
+            // or a former or real lone device : ask soon
             return (uint32_t) 5000;    // Allow 5 seconds for DHCP to finish
           }
           // Boot / reconnect, could be caused by side wide power failure :
           // so we stagger config requests between 20 to 30 minutes :
-          id(send_reqconfig) = false;  // No operator action? large wait, slow response
           return (uint32_t) (1200000 + random_uint32() % 600000);
       - lambda: 'id(last_req_ms) = millis();'
       - if:
@@ -1504,7 +1493,7 @@ script:
           then:
             - script.execute:
                 id: udp_tx
-                msg: !lambda 'return "LAMPGROUP:" + id(device_group).state + (id(send_reqconfig) ? ":REQCONFIG;" : ":RECONNECT;");'
+                msg: !lambda 'return "LAMPGROUP:" + id(device_group).state + ":REQCONFIG;";'
       - delay: 10s
       # Nothing from our group arrived: we are alone, so we assume we are synced.
       - if:
@@ -1521,15 +1510,13 @@ script:
           then:
             - delay: 5min
             # grab timestamp to ignore echo's
-            - lambda: |-
-                id(send_reqconfig) = true;
-                id(last_req_ms) = millis();
+            - lambda: id(last_req_ms) = millis();
             - script.execute:
                 id: udp_tx
                 msg: !lambda 'return "LAMPGROUP:" + id(device_group).state + ":REQCONFIG;";'
 
 
-  # Answer a REQCONFIG or RECONNECT send everything as s single packet
+  # Answer a REQCONFIG send everything as s single packet
   - id: group_dump
     mode: restart
     then:
@@ -1746,7 +1733,6 @@ button:
             ESP_LOGI("peers", "http://%s %s %s", q.substr(c1 + 1, c2 - c1 - 1).c_str(),
                      q.substr(0, c1).c_str(), q.substr(c2 + 1).c_str());
           }
-
 
 sensor:
 # Common diagnostic sensors from common/diagnostics.yaml are added from packages
