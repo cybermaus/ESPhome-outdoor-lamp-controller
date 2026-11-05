@@ -224,7 +224,7 @@ substitutions:
 # Substitutions like hardware pins from common/board-.....yaml added from packages
   devicename: outdoor-lamp
   description: Outdoor lamp controller.
-  prj_version: "2026.11.04"
+  prj_version: "2026.11.05"
 
   # Defaults compile locations, user can change them
 #  default_latitude:  "58.7" # Tiveden, SE
@@ -388,7 +388,7 @@ udp:
 
           // Any other packet from our group proves a peer exists :
           id(group_has_peers) = true;
-          // Others are answering: Device is not alone and a pending slow dump is not needed 
+          // Others are answering: So a suspect device is not alone and a pending DUMP reply is not needed 
           if (id(sync_is_suspect) && id(group_dump).is_running()) id(group_dump).stop();
 
           // A SUSPECT set is only accepted by lamps that are not in good standing themselves :
@@ -1040,7 +1040,6 @@ text:
               id(device_label).publish_state(h);   // force the clean text to the front end
             }
 
-
   # Name of the lamp group. Not broadcast: it selects the group. A new
   # name asks that group for its config.
   - platform: template
@@ -1522,6 +1521,7 @@ script:
     mode: restart
     then:
       # Suspect lamps answers slightly slower then lamps in good standing
+      # this is a wrapper script, so it can be canceled during the delay
       - delay: !lambda 'return (uint32_t) (random_uint32() % 500 + (id(sync_is_suspect) ? 2000 : 0));'
       - script.execute:
           id: group_send
@@ -1536,8 +1536,10 @@ script:
       msg: string
     then:
       - lambda: |-
+          std::string label = id(device_label).state;
+          if (label.empty()) label = App.get_name();
           id(tx_buf) = msg + "PEER:" + std::string(WiFi.localIP().toString().c_str()) + "," +
-                       id(device_label).state + "," + get_mac_address_pretty() + ";";
+                       label + "," + get_mac_address_pretty() + ";";
           ESP_LOGD("udp", "out: %s", id(tx_buf).c_str());
       - udp.write:
           id: lamp_udp
@@ -1587,6 +1589,7 @@ script:
           id(loc_lat).make_call().set_value(${default_latitude}).perform();
           id(loc_lon).make_call().set_value(${default_longitude}).perform();
           id(tz_text).make_call().set_value("${default_timezone}").perform();
+
 
 #  # Hostname from the label, applied after ESPHome's own apply at connect.
 #  - id: hostname_apply
@@ -1713,7 +1716,7 @@ button:
 # Common diagnostic text buttons from common/diagnostics.yaml added from packages
 
   - platform: template
-    name: "_Group writeout peers"
+    name: "_Group log out peers"
     id: peers_log
     entity_category: diagnostic
     disabled_by_default: true
