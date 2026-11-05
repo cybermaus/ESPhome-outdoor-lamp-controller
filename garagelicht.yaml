@@ -162,8 +162,8 @@ binary_sensor:
         pullup: ${wall_pullup}
       inverted: ${wall_inverted}
     name: "${channel_2} switch"
-    icon: mdi:lightbulb-outline
     id: garage_wall_switch
+    icon: mdi:electric-switch
     internal: true
     disabled_by_default: true
     filters:

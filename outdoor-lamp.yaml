@@ -857,6 +857,7 @@ binary_sensor:
       inverted: ${wall_inverted}
     name: "Switch Input"
     id: wall_switch
+    icon: mdi:electric-switch
     internal: true
     disabled_by_default: true
     filters:
