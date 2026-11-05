@@ -212,8 +212,8 @@ only one device so they will all respond.
 
 Because the clock is so important, unlike normal ESPHome, it does not reboot when it loses connectivity. If you simply wait for it to come back, you may wait a long time. But it does reboot... eventually
 
-- If there *is* a valid clock, it does not reboot for 30 days! However it does restart the wifi radio every day at about 13h00 to potentially unstuck it and rescan for strongest AP. (the normal AP rescan is disabled for reasons of UDP packet stability)
-- If there is a valid clock, and the clock is regularly resynced with NTP or HA, it never reboots.
+- If there *is* a valid clock, *and* the clock is regularly resynced with NTP or HA, it never reboots.
+- If there is a valid clock but it is *stale*, it does not reboot for 30 days!<br>However it does restart the wifi radio every day at about 13h00 to potentially unstuck it and also rescan for strongest AP. (the normal AP rescan is disabled for reasons of UDP packet stability)
 - If there is *no* valid clock, *but* it needs one (if would not need one if only a wall switch input is configured), it will reboot every 6 hours
 
 Additionally, if it does not find any WiFi, on wifi cycle or reboot, it will start the recovery access point, as is normal for ESPhome
