@@ -96,7 +96,7 @@
 #   LAMPGROUP:<group>:<PARAMETER>:<value>;....<PARAMETER>:<value>;COMPLETE;
 #   LAMPGROUP:<group>:<PARAMETER>:<value>;....<PARAMETER>:<value>;SUSPECT;
 #   LAMPGROUP:<group>:REQCONFIG;
-#   LAMPGROUP:<group>:HELLO;
+#   LAMPGROUP:<group>:RECONNECT;
 #   every request has a suffix:  PEER:<ip>,<label>,<mac>;
 #
 # The value is therefore everything between the first : and ; and can contain a : itself
@@ -187,28 +187,32 @@
 #                   and may hold wrong config. Cleared by a receiving a full config set
 #   All of the 3 above flags are cleared when user enters a new GROUP name
 #
-# PACKETS
-#   REQCONFIG   "Send me your config." 
-#   HELLO       "I just (re)connected." Sent early after boot or WiFi reconnect by a lamp
-#               because the request will be send late and staggered to deal with a 
-#               potential full site power outage: wait for network to come
+# REQUEST PACKETS
+#   REQCONFIG   Send config, new or suspect lamps request, demands immediate response. 
+#   RECONNECT   Sent after boot or WiFi reconnect by a lamp, only lamps up 
+#               for a longer time awnser it, other also just rebooted lamps ignore it.
 #   All are send and answered with a staggered delay to avoid collisions and storms
 #
 # ANSWERING
-#   Synced lamps answers REQCONFIG with all parameters. A sync_is_suspect device waits
-#   an extra few seconds and drops its awnser if it sees awnsers from upstanding devices. 
+#   Synced lamps answers a request with all parameters. A suspect device waits
+#   an extra few seconds and even drops its own awnser if it sees awnsers from upstanding
+#   devices.  A unsuspect device that also was active for 20 minutes already sends an 
+#   authorative COMPLETE all others send a self-doubting SUSPECT
 #
-# SUSPECT
-#   A suspect lamp, as mentioned, does awnser, but marks its packet SUSPECT, and upstanding 
-#   devices lamps ignore that packet. Two suspect devices in a pair do validate each other,
-#   so bringing two lone lamps together will make them pair up and drop their suspect flags.
+# SUSPECT vs COMPLETE vs AUTHORATIVE
+#   A lone lamp is suspect. But also a device that just woke up is not-authoritive and
+#   sends SUSPECT. A synced device ignores a suspect packet, but another suspect device
+#   does accept it. So two suspect devices confirm each other, but timing is such that
+#   the one rebooting looses and if they are both rebooting, its a trow of the dice.
+#   A lamp that was already non-suspect, but also have been awake for 20 minutes, missed
+#   nothing due to a reboot and is thus authoritive and is the only one sending COMPLETE
 #
 # BECOMING SYNCED
-#   - When a COMPLETE or SUSPECT packet was seen, but SUSPECT only when not already synced before
-#   - If 10 s after our own REQCONFIG nothing from our group arrived and we never seen
+#   - When a COMPLETE or SUSPECT response packet was seen
+#   - If 10 s after our own request no awnser arrives and we never seen
 #     any peers, we are alone, so we declare ourselves synced, but suspect
+#     the request is also repeated every 5 minutes.
 #   - If any packet arrives (ignoring echo) we have peers
-#   - If a lamp requested config but did not get a COMPLETE packet it repeats the request
 #
 
 #######################################################################################
@@ -291,8 +295,6 @@ wifi:
   fast_connect: false
   post_connect_roaming: false
   on_connect:
-    # Uncompleted experiment to update the DHCP/DNS hostname
-#   - script.execute: hostname_apply
     # This reads the gateway and assumes it is a NTP server
     - script.execute: net_setup
     # On every (re)connect: ask the group for the latest config
@@ -339,13 +341,16 @@ udp:
           size_t g_end = s.find(':', magic.size());
           if (g_end == std::string::npos ||
               s.substr(magic.size(), g_end - magic.size()) != group) {
-            return;                               // other group
+            ESP_LOGD("udp", "not responding, packet is for another group");
+            return;
           }
 
           // Everything after the group is a series of items, each ended by ';':
           //   NAME;   or   NAME:value;   Only ended items count, a cut packet is ignored.
           std::string body = s.substr(g_end + 1);
-          std::string param = body.compare(0, 10, "REQCONFIG;") == 0 ? "REQCONFIG" : "";
+          std::string param = body.compare(0, 10, "REQCONFIG;") == 0 ? "REQCONFIG"
+                            : body.compare(0, 10, "RECONNECT;") == 0 ? "RECONNECT" : "";
+
 
           // PEER:<ip>,<label>,<mac>; keep a table of peers, deduped on the MAC :
           size_t pp = body.find("PEER:");
@@ -374,12 +379,21 @@ udp:
             }
           }
 
-          if (param == "REQCONFIG") {
+          if (param == "REQCONFIG" || param == "RECONNECT") {
             // For 2 seconds, ignore as likely our own request coming back as an echo :
-            if (millis() - id(last_req_ms) >= 2000) {
+            if (millis() - id(last_outgoing_req_ms) >= 2000) {
+            
               id(group_has_peers) = true;
               if (id(group_is_synced)) {
-                id(group_dump).execute();
+                if (param == "REQCONFIG") {
+                  // REQCONFIG is answered immediately :
+                  id(group_dump).execute();
+                } else if ( millis() >= 1200000 && ! id(sync_is_suspect) ) {
+                  // RECONNECT is answered if self already active for at least 20 minutes :
+                  id(group_dump).execute();
+                } else {
+                  ESP_LOGD("udp", "not responding to RECONNECT due to short self uptime");
+                }
               }
             }
             return;
@@ -394,6 +408,7 @@ udp:
           // A SUSPECT set is only accepted by lamps that are not in good standing themselves :
           // this early return also ensures SUSPECT packets do not cancel a pending COMPLETE reply :
           if (body.find("SUSPECT;") != std::string::npos && id(group_is_synced) && ! id(sync_is_suspect)) {
+            ESP_LOGD("udp", "ignoring suspect packet due to good self standing");
             return;
           }
 
@@ -530,7 +545,7 @@ udp:
             id(group_is_synced) = true;
             id(group_live) = true;
             id(group_request).stop();
-            ESP_LOGD("udp", "in: COMPLETE set seen");
+            ESP_LOGD("udp", "in: full parameter set seen, marking self as synched");
           }
 
           // Evaluate once, shortly after the last item, without broadcasting :
@@ -598,7 +613,7 @@ globals:
     type: bool
     initial_value: 'false'
   # Time of our own last REQCONFIG, to ignore its echo
-  - id: last_req_ms
+  - id: last_outgoing_req_ms
     type: uint32_t
     initial_value: '0'
   # Packets waiting to be sent, one every 20 ms (see group_flush)
@@ -1432,7 +1447,8 @@ script:
                     msg += value_of(names[i]);
                     msg += ";";
                   }
-                  msg += id(sync_is_suspect) ? "SUSPECT;" : "COMPLETE;";
+                  // Only a lamp in good standing, up 20 minutes or more, is authoritative :
+                  msg += (! id(sync_is_suspect) && millis() >= 1200000) ? "COMPLETE;" : "SUSPECT;";
                 } else {
                   msg = param + ":" + value_of(param) + ";";
 
@@ -1469,9 +1485,10 @@ script:
             lambda: 'return id(group_is_synced) && ! id(sync_is_suspect) && ! id(device_group).state.empty();'
           then:
             - delay: !lambda 'return (uint32_t) (2000 + random_uint32() % 5000);'
+            - lambda: 'id(last_outgoing_req_ms) = millis();'
             - script.execute:
                 id: udp_tx
-                msg: !lambda 'return "LAMPGROUP:" + id(device_group).state + ":HELLO;";'
+                msg: !lambda 'return "LAMPGROUP:" + id(device_group).state + ":RECONNECT;";'
       - delay: !lambda |-
           if (id(req_fast)) {
             // User did a group change: network is up, ask immediate
@@ -1483,17 +1500,21 @@ script:
             // or a former or real lone device : ask soon
             return (uint32_t) 5000;    // Allow 5 seconds for DHCP to finish
           }
-          // Boot / reconnect, could be caused by side wide power failure :
-          // so we stagger config requests between 20 to 30 minutes :
-          return (uint32_t) (1200000 + random_uint32() % 600000);
-      - lambda: 'id(last_req_ms) = millis();'
+          // Good (already synced) lamp: the RECONNECT answers should have re-synced us.
+          // If not, first request after 5 to 6 minutes :
+          return (uint32_t) (300000 + random_uint32() % 60000);
+      - lambda: 'id(last_outgoing_req_ms) = millis();'
       - if:
           condition:
             lambda: 'return !id(device_group).state.empty();'
           then:
             - script.execute:
                 id: udp_tx
-                msg: !lambda 'return "LAMPGROUP:" + id(device_group).state + ":REQCONFIG;";'
+                msg: !lambda |-
+                  std::string req = ":REQCONFIG;";
+                  // A lamp that is already fairly certain of himself asks softer :
+                  if (id(group_is_synced) && ! id(sync_is_suspect)) req = ":RECONNECT;";
+                  return "LAMPGROUP:" + id(device_group).state + req;
       - delay: 10s
       # Nothing from our group arrived: we are alone, so we assume we are synced.
       - if:
@@ -1510,11 +1531,14 @@ script:
           then:
             - delay: 5min
             # grab timestamp to ignore echo's
-            - lambda: id(last_req_ms) = millis();
+            - lambda: id(last_outgoing_req_ms) = millis();
             - script.execute:
                 id: udp_tx
-                msg: !lambda 'return "LAMPGROUP:" + id(device_group).state + ":REQCONFIG;";'
-
+                msg: !lambda |-
+                  std::string req = ":REQCONFIG;";
+                  // A lamp that is already fairly certain of himself asks softer :
+                  if (id(group_is_synced) && ! id(sync_is_suspect)) req = ":RECONNECT;";
+                  return "LAMPGROUP:" + id(device_group).state + req;
 
   # Answer a REQCONFIG send everything as s single packet
   - id: group_dump
@@ -1589,31 +1613,6 @@ script:
           id(loc_lat).make_call().set_value(${default_latitude}).perform();
           id(loc_lon).make_call().set_value(${default_longitude}).perform();
           id(tz_text).make_call().set_value("${default_timezone}").perform();
-
-
-#  # Hostname from the label, applied after ESPHome's own apply at connect.
-#  - id: hostname_apply
-#    mode: restart
-#    then:
-#      - delay: 2s
-#      - lambda: |-
-#          const std::string &h = id(device_label).state;
-#          if (h.empty() || h == wifi_station_get_hostname()) {
-#            return;
-#          }
-#          wifi_station_set_hostname(const_cast<char *>(h.c_str()));
-#          for (netif *intf = netif_list; intf; intf = intf->next) {
-#            intf->hostname = wifi_station_get_hostname();
-#          }
-#          wifi_station_set_hostname(const_cast<char *>(h.c_str()));
-#          //wifi_station_dhcpc_stop();
-#          //wifi_station_dhcpc_start();
-#          for (netif *intf = netif_list; intf; intf = intf->next) {
-#            intf->hostname = wifi_station_get_hostname();
-#            if (netif_dhcp_data(intf) != nullptr) {
-#              dhcp_renew(intf);
-#            }
-#          }
 
 
 interval:
@@ -1722,13 +1721,11 @@ button:
     disabled_by_default: true
     internal: true # many diagnistics are not send to HA to minimize traffic
     on_press:
-      - if:
-          condition:
-            lambda: 'return ! id(device_group).state.empty();'
-          then:
-            - script.execute:
-                id: udp_tx
-                msg: !lambda 'return "LAMPGROUP:" + id(device_group).state + ":HELLO;";'
+      # send extra LAMP to update the peer lists of the others
+      # this is so if the user clicks to go to a peer, he can also click back
+      - script.execute:
+          id: group_send
+          param: "LAMP"
       - lambda: |-
           ESP_LOGI("peers", "--- peers seen: %d ---", (int) id(peers).size());
           for (auto &q : id(peers)) {
