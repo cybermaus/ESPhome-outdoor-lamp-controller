@@ -827,8 +827,7 @@ switch:
           // TODO sensor-schedule 
           if ( ! id(device_group).state.empty() && id(use_sensor).state && id(use_schedule).state && ! id(use_sun).state) {
             ESP_LOGI("combo", "Connect daylight sensor with Use schedule and without Use sun is not yet supported, switching it off");
-            id(use_sensor).turn_off();
-            id(use_sensor).publish_state(false);
+            id(use_sun).turn_on();
           }
       - if:
           condition:
