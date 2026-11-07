@@ -25,6 +25,9 @@
 #                  due to overcast. We call this "widen the dark" in comment lines  
 #   SENSOR+SCHED : On at sensor dark, but we go off for the dead of night
 #                  For example, on from dark-23h00 and from 05h30-light
+#                  // TODO sensor-schedule
+#                  This last combination is not yet supported on a grouped Device
+#                  due to some network protocol design challenges
 #   Similar intuitive use cases exist for the other permutations.
 #   MOTION is not part of these combinations, when motion detected and dark, then
 #          switch on, even in the dead of night with a programmed off period.
@@ -228,7 +231,7 @@ substitutions:
 # Substitutions like hardware pins from common/board-.....yaml added from packages
   devicename: outdoor-lamp
   description: Outdoor lamp controller.
-  prj_version: "2026.11.05"
+  prj_version: "2026.11.06"
 
   # Defaults compile locations, user can change them
 #  default_latitude:  "58.7" # Tiveden, SE
@@ -243,7 +246,7 @@ substitutions:
   udp_broadcast: 255.255.255.255
   udp_multicast: 239.0.60.53
   udp_port: "18511"
-  udp_retry: 100ms
+  udp_retry: 250ms
 
 #######################################################################################
 
@@ -708,6 +711,12 @@ switch:
     optimistic: true
     restore_mode: RESTORE_DEFAULT_ON
     on_turn_on:
+      - lambda: |-
+          // TODO sensor-schedule 
+          if ( ! id(device_group).state.empty() && id(use_sensor).state && id(use_schedule).state && ! id(use_sun).state) {
+            ESP_LOGI("combo", "Connect daylight sensor with Use schedule and without Use sun is not yet supported on a grouped device, switching it off");
+            id(use_sensor).turn_off();
+          }
       - script.execute: lamp_update
       - script.execute:
           id: group_send
@@ -735,6 +744,12 @@ switch:
           id: group_send
           param: "USE_SUN"
     on_turn_off:
+      - lambda: |-
+          // TODO sensor-schedule 
+          if ( ! id(device_group).state.empty() && id(use_sensor).state && id(use_schedule).state && ! id(use_sun).state) {
+            ESP_LOGI("combo", "Connect daylight sensor with Use schedule and without Use sun is not yet supported, switching it off");
+            id(use_sensor).turn_off();
+          }
       - script.execute: lamp_update
       - script.execute:
           id: group_send
@@ -808,14 +823,23 @@ switch:
     restore_mode: RESTORE_DEFAULT_OFF
     on_turn_on:
       - switch.turn_off: use_motion
+      - lambda: |-
+          // TODO sensor-schedule 
+          if ( ! id(device_group).state.empty() && id(use_sensor).state && id(use_schedule).state && ! id(use_sun).state) {
+            ESP_LOGI("combo", "Connect daylight sensor with Use schedule and without Use sun is not yet supported, switching it off");
+            id(use_sensor).turn_off();
+            id(use_sensor).publish_state(false);
+          }
       - if:
           condition:
             binary_sensor.is_on: wall_switch
           then:
             - switch.turn_on: sensor_act
             - lambda: 'id(sensor_keepalive_ms) = 0;'    # 0 indicates hardware origin
+      - script.execute: lamp_update
     on_turn_off:
       - switch.turn_off: sensor_act
+      - script.execute: lamp_update
     web_server:
       sorting_weight: 253
 
@@ -1096,6 +1120,13 @@ text:
               id(device_group).publish_state(h);
             }
         - script.execute: group_request
+        - lambda: |-
+            // TODO sensor-schedule 
+            if ( ! x.empty() && id(use_sensor).state && id(use_schedule).state && ! id(use_sun).state) {
+              ESP_LOGI("combo", "Connect daylight sensor with Use schedule and without Use sun is not yet supported on a grouped device, switching it off");
+              id(use_sensor).turn_off();
+            }
+
 
   # POSIX timezone string, see the header
   - platform: template
@@ -1210,9 +1241,6 @@ script:
 
 
           auto time = id(ha_time).now();
-          //ESP_LOGD("sun", "time=%s valid=%d TZ='%s' lat=%.1f lon=%.1f", t.strftime("%Y-%m-%d %H:%M:%S %z").c_str(),
-          //  id(ha_time).now().is_valid(), id(tz_text).state.c_str(), id(loc_lat).state, id(loc_lon).state);
-
           bool sun = id(use_sun).state;
           bool scd = id(use_schedule).state;
           bool sns = id(sensor_act).state;   // SENSOR action
@@ -1234,7 +1262,7 @@ script:
           // Neither sun nor schedule: only SENSOR, MOTION or the manual switch.
           // Needs no clock.
           if (!sun && !scd) {
-            snprintf(buf, sizeof(buf), "Manual switch only");
+            snprintf(buf, sizeof(buf), id(use_sensor).state ? "Dusk to dawn" : "Manual switch only");
             if (sns) {
               id(input_driven) = true;
               id(lamp_target) = 1;
@@ -1319,12 +1347,24 @@ script:
             if (scd) {
               // no Sun & Schedule: on from schedule_on to schedule_off, any length
               // Schedule only: the entire night, any length
-              // Wall_switch: when SENSOR this will widen light on period
+              // Wall_switch_sensor: when SENSOR this will widen light on period
               bool in_schedule = in_window(m, on, off);
-              id(lamp_target) = (in_schedule || sns) ? 1 : 0;
-              snprintf(buf, sizeof(buf), "%02d:%02d-%02d:%02d",
-                       id(schedule_on).hour, id(schedule_on).minute,
-                       id(schedule_off).hour, id(schedule_off).minute);
+              if (id(use_sensor).state) {
+                // Local sensor is the source of dark: dusk until schedule_off,
+                // pause until schedule_on, then on until dawn
+                bool pause = in_window(m, off, on);
+                id(lamp_target) = (sns && !pause) ? 1 : 0;
+                snprintf(buf, sizeof(buf), "dusk-%02d:%02d and %02d:%02d-dawn",
+                         id(schedule_off).hour, id(schedule_off).minute,
+                         id(schedule_on).hour, id(schedule_on).minute);
+              } else {
+                // No sensor, only follow schedule :
+                bool in_schedule = in_window(m, on, off);
+                id(lamp_target) = (in_schedule || sns) ? 1 : 0;
+                snprintf(buf, sizeof(buf), "%02d:%02d-%02d:%02d",
+                         id(schedule_on).hour, id(schedule_on).minute,
+                         id(schedule_off).hour, id(schedule_off).minute);
+              }
               id(lamp_info).publish_state(buf);
             }
           }
@@ -1363,6 +1403,7 @@ script:
     mode: restart
     then:
       - lambda: |-
+          // Rotate the NTP pool servers including GW dateway :
           bool time_is_stale = ! id(ha_time).now().is_valid() || (millis() - id(last_clock_sync_ms)) > 7200000;
           IPAddress gw = WiFi.gatewayIP();
           if (gw != IPAddress(0, 0, 0, 0) && time_is_stale) {
