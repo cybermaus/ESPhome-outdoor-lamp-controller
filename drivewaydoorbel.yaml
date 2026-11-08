@@ -1,0 +1,426 @@
+#######################################################################################
+# driveway doorbell sensor
+#
+# This is a derived partner device to the outdoor-lamp project
+# it serves as a one-off for myself, but others can use this as example derived device
+#
+# custom esp12f based pcb with additional inputs, most importantly 
+# a IR narrow beam sensor, when someone passes, after passing through 
+# a outer wide area PIR sensor, the doorbell rings.
+# If someone skips the PIR, it is either someone leaving, or a false alarm. 
+# like a leave or fog or a raindrop
+#
+# Switch 1 + Relay 1 normal outdoor-lamp group broadcast and config
+# In my setup, it will have the inner PIR sensor (not the outer PIR sensor)
+# for motion and no actual lamp output. See outdoor lamp project for details.
+#
+# Input 2 & 3 are Narrow IR laser beam and outer PIR sensor
+# Output 2 is the doorbel transmitter
+# These are not used in the normal outdoor-lamp setup
+#
+#######################################################################################
+#
+# First PIR then beam => doorbell.
+# Beam but no PIR => no doorbell.
+# First Beam then PIR => person going the other way, no doorbell.
+#   --> this means the outer PIR should *not* cover the exact beam area
+# 
+# Currently the PIR hold time to arm the Beam is PIR hardware, set the pot
+# to the perfect minimum, # such that it is still on while you cross the beam.
+# Practically that probably means setting it to absolute minimum. 
+#
+# this means if you are standing perfectly still inbetween the PIR and the beam
+# for the time it takes the PIR to disarm, you might be able to sneak through.
+# Or you could limbo dance your way below the beam.
+#
+
+packages:
+  outdoor-lamp: !include outdoor-lamp.yaml
+  diagnostics: !include common/diagnostics.yaml
+  # Pick one board. Pins, inversion and the platform block live there.
+  board: !include common/board-esp12f-doorbell-4m.yaml
+
+substitutions:
+  devicename: driveway
+  description: "Driveway motion detect doorbell"
+  prj_version: "2026.11.08"
+
+esphome:
+  name_add_mac_suffix: false
+  on_boot:
+    # Cosmetic really, after reboot, redo the potential outdoor-lamp follow
+    priority: -110
+    then:
+      - script.execute: drivewaylight_update
+
+web_server:
+  sorting_groups:
+    - id: sorting_group_doorbell
+      name: "Doorbell Settings"
+      sorting_weight: -50
+
+#######################################################################################
+
+globals:
+  # doorbell is suspended for a few seconds after someone passes
+  - id: doorbellsuspended
+    type: bool
+    initial_value: 'false'
+  # driveway light is on due to local PIR/Beam, not remote outdoor lamp
+  - id: local_pir_lamp_hold
+    type: bool
+    initial_value: 'false'
+
+
+number:
+
+  # time doorbell is suspended after ring, to avoid it ringing twice
+  # probably best in the 2~8 second range
+  - platform: template
+    name: "Doorbell suspend time"
+    id: suspendtime
+    icon: mdi:timer-pause-outline
+    entity_category: config
+    unit_of_measurement: "seconds"
+    min_value: 2
+    max_value: 10
+    step: 1
+    initial_value: 3
+    restore_value: true
+    optimistic: true
+    disabled_by_default: true
+    web_server:
+      sorting_weight: 210
+      sorting_group_id: sorting_group_doorbell
+
+  # time doorbell auto-reenable when disabled by user
+  # set to 8 hours seems reasonable, 30 seconds during test and debug
+  - platform: template
+    name: "Doorbell Manual disable time"
+    id: disabletime
+    icon: mdi:timer-pause-outline
+    entity_category: config
+    unit_of_measurement: "hours"
+    min_value: 2
+    max_value: 24
+    step: 2
+    initial_value: 8
+    restore_value: true
+    optimistic: true
+    disabled_by_default: true
+    web_server:
+      sorting_weight: 220
+      sorting_group_id: sorting_group_doorbell
+
+  # time the light will stay on after last sensor signal
+  # between 30 seconds and 5 minutes seems reasonable, 30 seconds during test and debug
+  - platform: template
+    name: "Driveway Sensor Light time"
+    id: shortlighttime
+    icon: mdi:timer-check-outline
+    entity_category: config
+    unit_of_measurement: "seconds"
+    min_value: 30
+    max_value: 300
+    step: 30
+    initial_value: 60
+    restore_value: true
+    optimistic: true
+    disabled_by_default: true
+    web_server:
+      sorting_weight: 230
+      sorting_group_id: sorting_group_doorbell
+
+
+output:
+
+  # Relay for the driveway light
+  - id: light_output
+    platform: gpio
+    pin: ${GPIO_Driveway_Relay}
+
+
+light:
+
+  # Define the output for driveway light relay
+  - platform: binary
+    name: "Driveway Light"
+    output: light_output 
+    id: drivewaylight
+    icon: mdi:light-flood-down
+    restore_mode: ALWAYS_OFF 
+    internal: false
+    web_server:
+      sorting_weight: 120
+      sorting_group_id: sorting_group_doorbell
+    on_turn_on:
+      - script.execute: status_blink
+      - logger.log:
+          format: "Drivewaylight turned on"
+          level:  INFO
+    on_turn_off:
+      - script.execute: status_blink
+      - logger.log:
+          format: "Drivewaylight turned off"
+          level:  INFO
+
+
+switch:
+
+  # Doorbel button is a simple PNP transistor or FET closing two wires
+  # it automatucally reopens after 0.1 second
+  # final one should have a pulldown resistor to avoid bootup ring
+  - platform: gpio
+    name: "Doorbell Button"
+    pin:
+      number: ${GPIO_Doorbel_Button}
+      mode: OUTPUT
+      inverted: false
+    id: doorbell
+    icon: mdi:doorbell
+    restore_mode: ALWAYS_OFF 
+    internal: false
+    on_turn_on:
+      - script.execute: status_blink
+      - logger.log:
+          format: "Doorbell pressed"
+          level:  INFO
+      - delay: .1s
+      - switch.turn_off: doorbell
+    web_server:
+      sorting_weight: 100
+      sorting_group_id: sorting_group_doorbell
+
+
+  # If user disables the doorbell, then renable it after 8 hours.
+  - platform: template
+    name: "Doorbell disable"
+    optimistic: true
+    id: doorbelldisabled
+    icon: mdi:motion-pause
+    restore_mode: ALWAYS_OFF
+    internal: false
+    on_turn_on:
+      - logger.log:
+          format: "Doorbell disabled by user for %.0f hours"
+          args: [ 'id(disabletime).state' ]
+          level:  INFO
+      - delay: !lambda "return (id(disabletime).state * 1000 * 3600);"
+      - switch.turn_off: doorbelldisabled
+    on_turn_off:
+      - logger.log:
+          format: "Doorbell reenabled by user"
+          level:  INFO
+    web_server:
+      sorting_weight: 110
+      sorting_group_id: sorting_group_doorbell
+
+
+  # Should the driveway lamp follow the group lamp for normal sun and night
+  # It still goes on for its own PIR and IR Beam of course.
+  - platform: template
+    name: "Light follows Lamp"
+    optimistic: true
+    id: followlamp
+    icon: mdi:content-copy
+    restore_mode: RESTORE_DEFAULT_OFF
+    internal: false
+    web_server:
+      sorting_weight: 130
+      sorting_group_id: sorting_group_doorbell
+
+
+binary_sensor:
+
+  # Outer PIR arms the doorbell and also maybe turns on driveway lamp
+  - platform: gpio
+    name: "PIR sensor"
+    id: pir_sensor
+    pin:
+      number: ${GPIO_PIR_Outer}
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    icon: mdi:motion-sensor
+    filters:
+      - delayed_on: ${on_debounce}
+      - delayed_off: 50ms
+    on_press:
+      - logger.log:
+          format: "PIR Outer activated"
+          level:  INFO
+      - script.execute: status_blink
+      - script.execute: drivewaylight_start
+    on_release:
+      - logger.log:
+          format: "PIR Outer de-activated"
+          level:  INFO
+      - script.execute: status_blink
+      - script.execute: drivewaylight_stop
+    web_server:
+      sorting_weight: 140
+      sorting_group_id: sorting_group_doorbell
+
+
+  # IR laser beam sensor input
+  # NPN type sensor, pulling to GND for on
+  - platform: gpio
+    name: "IR Beam"
+    id: ir_beam
+    pin:
+      number: ${GPIO_Beam_Sensor}
+      mode: INPUT_PULLUP
+      inverted: true
+    icon: mdi:motion-sensor
+    filters:
+      - delayed_on: 10ms
+      - delayed_off: 10ms
+    on_press:
+      - logger.log:
+          format: "Beam sensor activated"
+          level:  INFO
+      # If PIR sensor is on and we are not in beampause, then ring doorbel
+      - script.execute: status_blink
+      - if:
+          condition:
+            and:
+              - binary_sensor.is_on: pir_sensor
+              - switch.is_off: doorbelldisabled
+              - lambda: return ! id(doorbellsuspended);
+          then:
+            - switch.turn_on: doorbell
+      # also suspend BEAM for a short while
+      # even if the doorbell was not rung, as it may be because someone came from the other direction.
+      - script.execute: drivewaylight_start
+      - script.execute: doorbellsuspend_start
+    on_release:
+      - logger.log:
+          format: "Beam sensor de-activated"
+          level:  INFO
+      - script.execute: status_blink
+      - script.execute: drivewaylight_stop
+      - script.execute: doorbellsuspend_stop
+    web_server:
+      sorting_weight: 150
+      sorting_group_id: sorting_group_doorbell
+
+
+  # Readback the group lamp so we can optionally drive the driveway lamp
+  # identically (when no local PIR or Beam is observed)
+  - platform: template
+    name: "Group Lamp Follow"
+    id: group_lamp_on
+    disabled_by_default: true
+    internal: true
+    lambda: return id(lamp_output).remote_values.is_on();
+    on_press:
+      - script.execute: drivewaylight_update
+    on_release:
+      - script.execute: drivewaylight_update
+
+
+  # If doorbell was recently rung. Or user comes through beam from the other side
+  # suspend doorbell for a short while because someone is in transit
+  - platform: template
+    name: "Doorbell suspended"
+    icon: mdi:motion-pause
+    disabled_by_default: true
+    internal: true
+    lambda: return id(doorbellsuspended);
+    web_server:
+      sorting_weight: 200
+      sorting_group_id: sorting_group_doorbell
+
+
+script:
+
+  # Status LED blink 
+  # on any action or status change, blink the LED
+  - id: status_blink
+    mode: queued
+    then:
+#      - output.set_level:
+#          id: led_output
+#          level: !lambda 'return id(led_level).state / 10.0;'
+      - output.turn_on: led_output
+      - delay: 0.2s
+      - output.turn_off: led_output
+      - delay: 0.2s
+
+
+  # Avoid doorbell ringing twice short after each other
+  - id: doorbellsuspend_start
+    mode: restart
+    then:
+      - script.stop: doorbellsuspend_stop
+      - lambda: id(doorbellsuspended) = true;
+      - logger.log:
+          format: "Doorbell suspended for %.0f seconds"
+          args: [ 'id(suspendtime).state' ]
+          level:  INFO
+  - id: doorbellsuspend_stop
+    mode: restart
+    then:
+      - delay: !lambda "return (id(suspendtime).state * 1000);"
+      - lambda: id(doorbellsuspended) = false;
+      - logger.log:
+          format: "Doorbell resumed"
+          level:  INFO
+
+
+  # Turn on driveway light by PIR or Beam, 
+  - id: drivewaylight_start
+    mode: restart
+    then:
+      - script.stop: drivewaylight_stop
+      - lambda: id(local_pir_lamp_hold) = true;
+      - script.execute: drivewaylight_update
+  # But turn it off again after a short delay
+  - id: drivewaylight_stop
+    mode: restart
+    then:
+      - logger.log:
+          format: "Drivewaylight on for %.0f seconds"
+          args: [ 'id(shortlighttime).state' ]
+          level:  INFO
+      - delay: !lambda "return (id(shortlighttime).state * 1000);"
+      - lambda: id(local_pir_lamp_hold) = false;
+      - script.execute: drivewaylight_update
+
+
+  # optionally the driveway lamp should follow the group lamp in its sun and
+  # night cycle, but not turn off is the local PIR wants it on.
+  - id: drivewaylight_update
+    mode: restart
+    then:
+      - lambda: |-
+          // Same darkness rule as the outdoor-lamp MOTION branch, including
+          // "no valid clock must not disable a light".
+          // alas we need to duplicate it here, as that dark state is not reachable
+          
+          static const double elevations[] = {-0.833, -3.0, -6.0};
+          size_t lvl = id(twilight).active_index().value_or(0);
+          if (lvl > 2) lvl = 0;
+          bool dark = !id(ha_time).now().is_valid() ||
+                      id(sun_sun).elevation() < elevations[lvl];
+
+          bool already_on  = id(drivewaylight).remote_values.is_on();
+          bool want_follow = (id(followlamp).state && id(group_lamp_on).state);
+          bool want_local  = (id(local_pir_lamp_hold) && dark);
+          bool want_on = want_follow || want_local;
+          if (want_on != already_on) {
+            if (want_on) id(drivewaylight).turn_on().perform();
+            else         id(drivewaylight).turn_off().perform();
+          }
+
+interval:
+  # Re-evaluates the driveway light once a minute
+  # this is mostly needed for the darkness coming in/out after a local PIR
+  # driven driveway_lamp action was done. 
+  - interval: 1min
+    then:
+      - script.execute: drivewaylight_update
+      
+# end of the doorbellsensor sketch                
+#################################################################################

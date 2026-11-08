@@ -1,0 +1,34 @@
+# Board: ESP12F on custom doorbell PCB, 4MB flash but use 2MB
+# board need a bodge wire, GPIO15 boot resistor to ground
+substitutions:
+  show_board:      ESP12F    # string shown in HA
+  GPIO_relay:      GPIO4     # relay, unused GPIO
+  # unused GPIO, though part of outdoor-lamp group, this board does not
+  # has a lamp in it. Only a PIR sensor input
+  relay_inverted:  true
+  GPIO_wall_input: GPIO12    # Inner PIR sensor, 1st input
+  wall_inverted:   true
+  wall_pullup:     true
+  on_debounce:     4ms       # on this board, only 1-8ms works
+                             # because of the 50Hz demodulation
+  pushbutton:      "false"
+  GPIO_Status_LED: GPIO2     # built-in LED
+  led_inverted:    true
+  led_platform:    esp8266_pwm
+  web_local:       true
+
+  # The actual doorbell specific GPIO
+  GPIO_Driveway_Relay: GPIO15    # relay 2 front lamp, actual relay
+  GPIO_PIR_Outer:      GPIO14    # outer PIR sensor, 3rd input
+  GPIO_Doorbel_Button: GPIO16    # FET switch doorbell, top connector
+                                 # Not an ideal choice, it boots high, so a bell will sound at boot.
+  GPIO_Beam_Sensor:    GPIO13    # Narrow IR laserbeam, middle input
+
+esphome:
+  platformio_options:
+    board_upload.flash_size: 2MB
+    board_build.ldscript: eagle.flash.2m64.ld
+
+esp8266:
+  board: esp01_1m
+  restore_from_flash: true
