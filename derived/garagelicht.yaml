@@ -15,10 +15,9 @@
 #######################################################################################
 
 packages:
-  outdoor-lamp: !include outdoor-lamp.yaml
-  diagnostics: !include common/diagnostics.yaml
+  outdoor-lamp: !include ../outdoor-lamp.yaml
   # Pick one board. Pins, inversion and the platform block live there.
-  board: !include common/board-shelly2.5-classic-2m.yaml
+  board: !include ../common/board-shelly2.5-classic-2m.yaml
 
 substitutions:
 # Substitutions like hardware pins from common/board-.....yaml added from packages
