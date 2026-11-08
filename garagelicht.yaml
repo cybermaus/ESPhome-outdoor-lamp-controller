@@ -24,7 +24,7 @@ substitutions:
 # Substitutions like hardware pins from common/board-.....yaml added from packages
   devicename: garagelicht
   description: "Garage Licht Controller"
-  prj_version: "2026.11.03"
+  prj_version: "2026.11.06"
   channel_1: Lamp
   channel_2: Garage
   max_power: "400.0"
@@ -54,6 +54,9 @@ sensor:
       internal: true
       disabled_by_default: true
       icon: mdi:flash
+      filters:
+        - lambda: return round(x * 100.0f) / 100.0f;
+        - offset: -0.02 
       web_server:
         sorting_weight: 110
         sorting_group_id: sorting_group_garage
@@ -62,13 +65,16 @@ sensor:
       internal: true
       disabled_by_default: true
       icon: mdi:flash
+      filters:
+        - lambda: return round(x * 100.0f) / 100.0f;
+        - offset: -0.02 
     active_power_a:
       name: ${channel_2} power
       id: power_channel_2
       icon: mdi:flash
       disabled_by_default: true
       filters:
-        - lambda: return -x;
+        - lambda: return round(x * 2.0f) / 2.0f;
       web_server:
         sorting_weight: 130
         sorting_group_id: sorting_group_garage
@@ -88,9 +94,10 @@ sensor:
       icon: mdi:flash
       disabled_by_default: true
       filters:
-        # active_power_b is inverted, so take the value * -1 or the absolute value
+        # active_power_b is inverted, so take the value * -1
         # this not the case for active_power_a
-        - lambda: return abs(x);
+        - lambda: return -x;
+        - lambda: return round(x * 2.0f) / 2.0f;
       on_value_range:
         - above: ${max_power}
           then:
@@ -112,8 +119,8 @@ sensor:
     filters:
       # Multiplication factor from W to kWh is 0.001
       - multiply: 0.001
-      - round_to_multiple_of: 0.001
-      - delta: 0.001
+#      - round_to_multiple_of: 0.001
+#      - delta: 0.001
     unit_of_measurement: kWh
     device_class: energy
     state_class: total_increasing
@@ -126,8 +133,8 @@ sensor:
     filters:
       # Multiplication factor from W to kWh is 0.001
       - multiply: 0.001
-      - round_to_multiple_of: 0.001
-      - delta: 0.001
+#      - round_to_multiple_of: 0.001
+#      - delta: 0.001
     unit_of_measurement: kWh
     device_class: energy
     state_class: total_increasing
@@ -137,11 +144,14 @@ sensor:
       sorting_weight: 120
       sorting_group_id: sorting_group_garage
 
+
 # The simple relay/switch/light combo for the extra garage lamp
 output:
   - platform: gpio
     pin: ${GPIO_relay2}
     id: garage_relay_output
+
+
 light:
   - platform: binary
     name: "Garage lamp"
@@ -149,10 +159,14 @@ light:
     id: garage_lamp_output
     icon: mdi:lightbulb-outline
     on_turn_on:
+      - lambda: 'id(garage_long).publish_state(false);'
       - script.execute: garage_autooff
+    on_turn_off:
+      - lambda: 'id(garage_long).publish_state(false);'
     web_server:
       sorting_weight: 100
       sorting_group_id: sorting_group_garage
+
 binary_sensor:
   - platform: gpio
     pin:
@@ -162,22 +176,87 @@ binary_sensor:
         pullup: ${wall_pullup}
       inverted: ${wall_inverted}
     name: "${channel_2} switch"
-    id: garage_wall_switch
     icon: mdi:electric-switch
+    id: garage_wall_switch
     internal: true
     disabled_by_default: true
     filters:
-      - delayed_on: 50ms
+      - delayed_on: ${on_debounce}
       - delayed_off: 50ms
+    web_server:
+      sorting_weight: 190
+      sorting_group_id: sorting_group_garage
+    # it has a pushbutton style switch
+    on_click:
+      # short press: toggle on release
+      - min_length: 50ms
+        max_length: 800ms
+        then:
+          - light.toggle: garage_lamp_output
+      # long press: on, 4 h mode
+      - min_length: 800ms
+        max_length: 10s
+        then:
+          - light.turn_on: garage_lamp_output
+          - lambda: 'id(garage_long).publish_state(true);'
+          - script.execute: garage_autooff
+
+  # long timeout indicator
+  - platform: template
+    name: "${channel_2} long timeout"
+    id: garage_long
+    icon: mdi:timer-lock-outline
+    internal: true
+    web_server:
+      sorting_weight: 195
+      sorting_group_id: sorting_group_garage
+      
+switch:
+  # Presence: HA/REST/web keepalive. Each turn_on call restarts the garage timer.
+  - platform: template
+    name: "${channel_2} presence"
+    id: garage_presence
+    icon: mdi:account-check
+    optimistic: true
+    restore_mode: ALWAYS_OFF
     web_server:
       sorting_weight: 140
       sorting_group_id: sorting_group_garage
-    on_press: # it has a pushbutton style switch
-      then:
-        - light.toggle: garage_lamp_output
+    turn_on_action:
+      - if:
+          condition:
+            light.is_on: garage_lamp_output
+          then:
+            - script.execute: garage_autooff
+      - script.execute: garage_presence_expire
+    on_turn_off:
+      - script.stop: garage_presence_expire
+
+
 script:
+  # Garage light turns off after 10 minutes or 2 hours
   - id: garage_autooff
     mode: restart
     then:
-      - delay: 4h
+      - delay: !lambda 'return id(garage_long).state ? 14400000 : 600000;'
       - light.turn_off: garage_lamp_output
+
+  # Presence drops after 10 min without a keepalive
+  - id: garage_presence_expire
+    mode: restart
+    then:
+      - delay: 601 seconds
+      - switch.turn_off: garage_presence
+
+      
+interval:
+  # While MOTION is active and the garage lamp is on, keep restarting the 4h timer
+  - interval: 10s
+    then:
+      - if:
+          condition:
+            and:
+              - lambda: 'return id(motion_act).state;'
+              - light.is_on: garage_lamp_output
+          then:
+            - script.execute: garage_autooff
