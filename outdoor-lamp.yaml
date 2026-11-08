@@ -899,7 +899,7 @@ binary_sensor:
     internal: true
     disabled_by_default: true
     filters:
-      - delayed_on: 50ms
+      - delayed_on: ${on_debounce}
       - delayed_off: 50ms
     on_state:
       - lambda: |-

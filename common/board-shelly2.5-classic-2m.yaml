@@ -9,6 +9,7 @@ substitutions:
   GPIO_wall_input: GPIO13    # wall switch 1 input
   wall_inverted:   false
   wall_pullup:     false
+  on_debounce:     50ms        # safe value
   pushbutton:      "false"
   GPIO_Status_LED: GPIO1     # LED (they claim it has one, I do not see it)
   led_inverted:    true

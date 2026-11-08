@@ -7,6 +7,7 @@ substitutions:
   GPIO_wall_input: GPIO0      # has push button, not switch
   wall_inverted:   true
   wall_pullup:     true
+  on_debounce:     50ms        # safe value
   pushbutton:      "true"
   GPIO_Status_LED: GPIO13     # RED is hardlinked to relay, this is the blue led
   led_inverted:    true

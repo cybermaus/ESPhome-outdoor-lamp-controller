@@ -6,11 +6,12 @@ substitutions:
   GPIO_wall_input: GPIO5
   wall_inverted:   true
   wall_pullup:     false
+  on_debounce:     50ms        # safe value
   pushbutton:      "false"
   GPIO_Status_LED: GPIO2     # built-in LED
   led_inverted:    true
   led_platform:    esp8266_pwm
-  web_local:       false
+  web_local:       true
 
 esphome:
   platformio_options:
