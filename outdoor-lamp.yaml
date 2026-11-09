@@ -231,7 +231,7 @@ substitutions:
 # Substitutions like hardware pins from common/board-.....yaml added from packages
   devicename: outdoor-lamp
   description: Outdoor lamp controller.
-  prj_version: "2026.11.06"
+  prj_version: "2026.11.09"
 
   # Defaults compile locations, user can change them
 #  default_latitude:  "58.7" # Tiveden, SE
@@ -1321,22 +1321,37 @@ script:
               snprintf(buf, sizeof(buf), "Next sun up %02d:%02d down %02d:%02d",
                        up->hour, up->minute, dn->hour, dn->minute);
               id(twilight_info).publish_state(buf);
-              if (scd) {
-                snprintf(buf, sizeof(buf), "%02d:%02d-%02d:%02d and %02d:%02d-%02d:%02d",
-                         id(schedule_on).hour, id(schedule_on).minute,
-                         up->hour, up->minute, dn->hour, dn->minute,
-                         id(schedule_off).hour, id(schedule_off).minute);
-              } else {
+              if (scd) { // sun and schedule :
+                // Text subfunction, prints a window, or none when start is not before stop.
+                // Minutes may exceed 1440 for a next-day post midnight time.
+                auto win_text = [](char *out, size_t n, int start, int stop) {
+                  if (start < stop) {
+                    snprintf(out, n, "%02d:%02d-%02d:%02d",
+                             (start / 60) % 24, start % 60, (stop / 60) % 24, stop % 60);
+                  } else {
+                    snprintf(out, n, "none");
+                  }
+                };
+                int up_m = up->hour * 60 + up->minute;
+                int dn_m = dn->hour * 60 + dn->minute;
+                if (dn_m < up_m) dn_m += 1440;             // sunset after midnight, sunrise never is
+                int off_m = (off < on) ? off + 1440 : off; // schedule_off after midnight
+                char am[16], pm[16];
+                win_text(am, sizeof(am), on, up_m);        // morning: schedule_on until sunrise
+                win_text(pm, sizeof(pm), dn_m, off_m);     // evening: sunset until schedule_off
+                snprintf(buf, sizeof(buf), "%s and %s", am, pm);
+
+              } else {   // sun and no schedule :
                 snprintf(buf, sizeof(buf), "%02d:%02d-%02d:%02d",
                          dn->hour, dn->minute, up->hour, up->minute);
               }
             } else {
               id(twilight_info).publish_state("No sunrise/sunset today");
-              if (scd) {
+              if (scd) { // all day sun or night but also a schedule :
                 snprintf(buf, sizeof(buf), "Follows sun, off %02d:%02d-%02d:%02d",
                          id(schedule_off).hour, id(schedule_off).minute,
                          id(schedule_on).hour, id(schedule_on).minute);
-              } else {
+              } else {   // all day sun or night and no schedule :
                 snprintf(buf, sizeof(buf), "Follows sun level");
               }
             }
