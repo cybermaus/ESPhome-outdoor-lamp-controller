@@ -34,7 +34,7 @@ And it does not need
 * No central controller, hub, or coordinator of any kind
 * No cloud, no account, no subscription
 * No internet (if NTP comes from local gateway)
-* No ESP-NOW pairing, no fixed master/slave topology
+* No no fixed master/slave topology, all peers
 
 ### Main controlling modes
 
