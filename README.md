@@ -10,18 +10,31 @@ A small ESPHome controller for outdoor lamps: one relay, one wall input, and a d
 
 <img width="695" height="134" alt="image" src="https://github.com/user-attachments/assets/c761939d-1417-4cd1-a9ae-41f5cd895fe9" />
 
-It works **without central control** or even somewhat without stable network, for example when the lamp is placed far from the WiFi. It only needs to sync time once.
-Each lamp calculates its own cycle. For the rest there is no reliance on connectivity, internet service, or any central controller like Home Assistant.
-If WiFi, Home Assistant or the router goes away, the lamps keep switching on their own clock.
+It works **without central control**. There is no reliance on any central controller like Home Assistant, no MQTT broker,
+no ESP Now, no cloud account. It even works without stable network, for example when the lamp is placed far from the WiFi. It only needs to sync time once.
+Each lamp calculates its own cycle.
 
 ### Yet despite not relying on centralized control, multiple devices still work as one.
-Lamps that share a group name configure and switch together,
+Lamps that share a group name configure and switch together over local UDP
 and show up in Home Assistant. Change a setting on one lamp and the whole group is updated. Whichever lamp reaches a switching moment first drives
 the group, and the others follow virtually instantly so they visually appear as a single wired lamp chain. A lamp reconnecting to bad WiFi asks
 the group what is going on in case it missed any configuration updates. 
 
 It also works far up north, where sunset is sometimes past midnight, and evening twilight merges into morning twilight. It should even work
 above the polar circle, but that has only been tested in lab conditions. 
+
+### What it does, bulleted
+
+* It switches lamps based on a sun schedule
+* It switches them synchronized as if on a single virtual wire
+
+And it does not need
+* No Home Assistant required (works with it, works without it)
+* No MQTT broker
+* No central controller, hub, or coordinator of any kind
+* No cloud, no account, no subscription
+* No internet (if NTP comes from local gateway)
+* No ESP-NOW pairing, no fixed master/slave topology
 
 ### Main controlling modes
 
