@@ -263,7 +263,6 @@ esphome:
     then:
       - lambda: 'id(sync_is_suspect) = !id(group_has_peers) && id(group_is_synced);'
       - lambda: 'id(boot_done) = true;' 
-      - script.execute: lamp_update
 
 # keeping close track on the flash writes, we also always write them to the logger
 #preferences:
@@ -275,6 +274,8 @@ logger:
   logs:
     status_led: NONE   # is just taking up space
     preferences: DEBUG # I want to see the 'Saved' message
+    sntp: DEBUG # keeping a close eye on time from sntp
+    time: DEBUG # keeping a close eye on time from ha api
 
 #debug:
 #  update_interval: 10s
@@ -1118,7 +1119,7 @@ text:
               id(device_group).make_call().set_value(h).perform();
               id(device_group).publish_state(h);
             }
-        - script.execute: group_request
+        - lambda: if (id(boot_done)) id(group_request).execute();
         - lambda: |-
             // TODO sensor-schedule 
             if ( ! x.empty() && id(use_sensor).state && id(use_schedule).state && ! id(use_sun).state) {
@@ -1432,7 +1433,7 @@ script:
             }
             step = (step + 1) % 5;
             configTime(0, 0, ntp_buf);
-            ESP_LOGI("ntp", "NTP server: %s", ntp_buf);
+            ESP_LOGI("sntp", "NTP server: %s", ntp_buf);
             if (! id(tz_text).state.empty()) id(ha_time).set_timezone(id(tz_text).state);
           }
 
@@ -1456,7 +1457,7 @@ script:
             esp_sntp_stop();
             esp_sntp_setservername(0, ntp_buf);
             esp_sntp_init();
-            ESP_LOGI("ntp", "NTP server: %s", ntp_buf);
+            ESP_LOGI("sntp", "NTP server: %s", ntp_buf);
             if (! id(tz_text).state.empty()) id(ha_time).set_timezone(id(tz_text).state);
           }
           #endif
