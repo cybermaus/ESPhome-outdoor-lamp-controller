@@ -246,7 +246,7 @@ substitutions:
   udp_broadcast: 255.255.255.255
   udp_multicast: 239.0.60.53
   udp_port: "18511"
-  udp_retry: 250ms
+  udp_retry: 10ms
 
 #######################################################################################
 
@@ -332,22 +332,39 @@ udp:
   on_receive:
     then:
       - lambda: |-
-      
+
+          // ignore other protocol magics :
           std::string s(data.begin(), data.end());
           const std::string magic = "LAMPGROUP:";
           std::string group = id(device_group).state;
-          ESP_LOGD("udp", "in: %s", s.c_str());
-          if (group.empty() || s.compare(0, magic.size(), magic) != 0) {
+          if (s.compare(0, magic.size(), magic) != 0) {
+            //ESP_LOGD("udp", "in: %s", s.c_str());
+            //ESP_LOGD("udp", "no correct magic protocol marker");
             return;
           }
 
           // LAMPGROUP:<group>:<param>[:<value>]; :
           size_t g_end = s.find(':', magic.size());
-          if (g_end == std::string::npos ||
+          if (group.empty() || g_end == std::string::npos ||
               s.substr(magic.size(), g_end - magic.size()) != group) {
+            ESP_LOGD("udp", "in: %s", s.c_str());
             ESP_LOGD("udp", "not responding, packet is for another group");
             return;
           }
+
+          // duplicate suppression: if all 3 send attempts arrive, ignore the extras
+          static std::string last_s;
+          static uint32_t last_ms = 0;
+          uint32_t now = millis();
+          if ( (now - last_ms) < 2000 && s == last_s ) {
+            //ESP_LOGD("udp", "in: %s", s.c_str());
+            //ESP_LOGD("udp", "duplicate packet dropped");
+            return;
+          }
+          last_s = s;
+          last_ms = now;
+          ESP_LOGD("udp", "in: %s", s.c_str());
+
 
           // Everything after the group is a series of items, each ended by ';':
           //   NAME;   or   NAME:value;   Only ended items count, a cut packet is ignored.
@@ -1651,6 +1668,11 @@ script:
           id: lamp_udp
           data: !lambda 'return std::vector<uint8_t>(id(tx_buf).begin(), id(tx_buf).end());'
       # sending it twice to counter lossy UDP
+      - delay: ${udp_retry}
+      - udp.write:
+          id: lamp_udp
+          data: !lambda 'return std::vector<uint8_t>(id(tx_buf).begin(), id(tx_buf).end());'
+      # trice even. 
       - delay: ${udp_retry}
       - udp.write:
           id: lamp_udp
