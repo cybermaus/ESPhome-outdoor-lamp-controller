@@ -1,0 +1,26 @@
+# Board: Shelly1 plus1, ESP32 with 4MB flash
+substitutions:
+  show_board:      ShellyPlus1 # string shown in HA
+  GPIO_relay:      GPIO26      # relay
+  relay_inverted:  false
+  GPIO_wall_input: GPIO4       # wall switch input
+  wall_inverted:   false
+  wall_pullup:     false
+  on_debounce:     50ms        # safe value
+  pushbutton:      "false"
+  GPIO_Status_LED: GPIO0       # barely visible through housing
+  led_inverted:    true
+  led_platform:    ledc
+  web_local:       true
+  
+esp32:
+  variant: esp32
+  cpu_frequency: 160MHz
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_FREERTOS_UNICORE: y
+
+esphome:
+  includes:
+    - <esp_sntp.h>

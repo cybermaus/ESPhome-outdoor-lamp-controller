@@ -34,6 +34,7 @@ text_sensor:
   - platform: wifi_info
     ip_address:
       name: "_IP Address"
+      id: local_ip
       disabled_by_default: true
       internal: true # many diagnistics are not send to HA to minimize traffic
     ssid:

@@ -1417,6 +1417,8 @@ script:
     mode: restart
     then:
       - lambda: |-
+
+          #ifdef USE_ESP8266
           // Rotate the NTP pool servers including GW dateway :
           bool time_is_stale = ! id(ha_time).now().is_valid() || (millis() - id(last_clock_sync_ms)) > 7200000;
           IPAddress gw = WiFi.gatewayIP();
@@ -1433,7 +1435,31 @@ script:
             ESP_LOGI("ntp", "NTP server: %s", ntp_buf);
             if (! id(tz_text).state.empty()) id(ha_time).set_timezone(id(tz_text).state);
           }
-          
+
+          #elif defined(USE_ESP32)
+          // Rotate the NTP pool servers including GW dateway :
+          bool time_is_stale = ! id(ha_time).now().is_valid() || (millis() - id(last_clock_sync_ms)) > 7200000;
+          esp_netif_ip_info_t ip_info;
+          esp_netif_t *nif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+          bool gw_ok = nif != nullptr && esp_netif_get_ip_info(nif, &ip_info) == ESP_OK && ip_info.gw.addr != 0;
+          if (gw_ok && time_is_stale) {
+            static char ntp_buf[20];          // NTP server, static as must persist to NTP client
+            static uint8_t step = 0;          // Cycle: gateway, 0.pool, 1.pool, 2.pool, 3.pool
+            if (step == 0) {
+              snprintf(ntp_buf, sizeof(ntp_buf), "%u.%u.%u.%u",
+                       (unsigned) (ip_info.gw.addr & 0xFF), (unsigned) ((ip_info.gw.addr >> 8) & 0xFF),
+                       (unsigned) ((ip_info.gw.addr >> 16) & 0xFF), (unsigned) ((ip_info.gw.addr >> 24) & 0xFF));
+            } else {
+              snprintf(ntp_buf, sizeof(ntp_buf), "%u.pool.ntp.org", (unsigned) (step - 1));
+            }
+            step = (step + 1) % 5;
+            esp_sntp_stop();
+            esp_sntp_setservername(0, ntp_buf);
+            esp_sntp_init();
+            ESP_LOGI("ntp", "NTP server: %s", ntp_buf);
+            if (! id(tz_text).state.empty()) id(ha_time).set_timezone(id(tz_text).state);
+          }
+          #endif
 
   # Send one parameter to the group. The value is made here from the
   # parameter name, which is the uppercase ID.
@@ -1617,7 +1643,7 @@ script:
       - lambda: |-
           std::string label = id(device_label).state;
           if (label.empty()) label = App.get_name();
-          id(tx_buf) = msg + "PEER:" + std::string(WiFi.localIP().toString().c_str()) + "," +
+          id(tx_buf) = msg + "PEER:" + id(local_ip).state + "," +
                        label + "," + get_mac_address_pretty() + ";";
           ESP_LOGD("udp", "out: %s", id(tx_buf).c_str());
       - udp.write:
