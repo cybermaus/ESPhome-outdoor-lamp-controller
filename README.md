@@ -34,7 +34,7 @@ And it does not need
 * No central controller, hub, or coordinator of any kind
 * No cloud, no account, no subscription
 * No internet (if NTP comes from local gateway)
-* No no fixed master/slave topology, all peers
+* No fixed master/slave topology, all peers
 
 ### Main controlling modes
 
@@ -88,7 +88,7 @@ Any manually switched state stays until the next sun or schedule cycle update.
 
 ### Hardware
 
-For now, only ESP8266, but soon will add ESP32, as I need those myself.
+Either ESP8266 or ESP32.
 Select the correct `common/board...` file, or create one based on the example of the others. You need uncomment or add your
 board to the main `outdoor-lamp.yaml`  in the `packages:` component
 
@@ -118,8 +118,8 @@ Any user change is also sent to the group
 | Entity | What it does |
 |---|---|
 | Lamp | The Lamp state |
-| Motion | Motion is detected (normally disabled) |
-| Sensor | Daylight sensor active (it's dark) |
+| Motion | Motion is detected. By any group device, or set by HA |
+| Sensor | Daylight sensor active (it's dark). Detected by any group device, or set by HA |
 
 ### Entities with some optional user settings or information
 
@@ -159,7 +159,7 @@ The timezone is a POSIX string, not a name. Examples:
 The time comes from Home Assistant or from NTP. If the clock is stale (without recent updates) the NTP rotates through the DHCP gateway and internet pool servers.
 Without a valid clock the lamp cycle does nothing but the wall switch and any hardware input sensors keep working
 
-**Sun levels.**
+###Sun levels.###
 
 | Twilight level | Sun elevation |
 |---|---|
@@ -215,8 +215,8 @@ only one device so they will all respond.
 | The lamp never follows the cycle | Lamp Schedule says "No valid clock": check WiFi, NTP and Home Assistant time |
 | Lamp Schedule says "Manual switch only" | Use sun and Use schedule are both off |
 | Switching at the wrong time of day | Timezone text, latitude and longitude |
-| Lamps do not follow each other | Same group name, same UDP port, network allows broadcast, router client isolation |
-| New lamp does not get the group settings | Under some conditions, like after a suspected power failure, it waits 20 to 40 minutes to allow the rest of the network to come back. You can force it by changing the group name to a temporary name and back. |
+| Lamps do not follow each other | Same group name, network allows broadcasts, check router's client isolation |
+| New lamp does not get the group settings | Same group name, network allows broadcasts, check router's client isolation. After fixing the latter you can retry by re-entering the group name, or wait a few minutes. |
 | Lamp is on when the cycle says off | A manual switch or sensor input may last until the cycle next changes state |
 | Wall switch does nothing | Connect daylight sensor or Connect motion sensor is on, so the input is read as one of those |
 | Device lost from the network | See reboot/recover section below |
