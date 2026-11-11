@@ -1772,9 +1772,6 @@ interval:
           condition:
             lambda: 'return (id(motion_act).state && id(motion_keepalive_ms) == 0) || (id(sensor_act).state && id(sensor_keepalive_ms) == 0);'
           then:
-            - script.execute:
-                id: group_send
-                param: "LAMP"
             - if:
                 #if MOTION originated here, then resend it every 5 minutes
                 condition:
