@@ -56,7 +56,7 @@ They combine in the way you would expect:
 - **Sun only**: on from sundown to sunup, the whole night.
 - **Sun + schedule**: on from sundown until the off time (say 23:00), off during the night, and on again from the on time (say 05:30)
 until sunup. A short, efficient lamp cycle that still lights the dark hours you care about.
-- **Sensor on top of any of these**: a dark, overcast sky can turn the lamp on early or keep it on later.
+- **Sensor on top of any of these**: Use the sensor as main sunlight driver, but fall back on the sun with network problems.
 - **Sensor only**: the lamp simply follows the sensor, and shares that with the group, only one need a sensor, and they all switch as one.
 - **None**: the lamp only follows the wall switch (or Home Assistant) and drives the group to all switch as one.
 - **Motion**: when motion is detected and it is dark, the lamp is on, even in the dead of night.
@@ -64,11 +64,11 @@ until sunup. A short, efficient lamp cycle that still lights the dark hours you 
 **Twilight level.** The Twilight level can be set: Normal (the official sunrise
 and sunset), Half Civil, or Civil twilight (the lamp stays on longer).
 
-**Optional wall switch.** Can be a wall switch, a daylight sensor, or a motion sensor. As wall switch, input acts a hotel or hallway
+**Optional wall switch input** Can be a wall switch, a daylight sensor, or a motion sensor. As wall switch, input acts a hotel or hallway
 switch setup: every flip of any switch toggles the lamp and the whole group follows. Multiple locations can hold a wall switch.
 Any manually switched state stays until the next sun or schedule cycle update. 
 
-**Feedback info** Two text sensors show the next sun up and sun down, and the active lamp switch schedule.
+**Feedback info** Two text fields show the next sun up and sun down, and the active lamp switch schedule.
 
 ### All settings
 
@@ -88,7 +88,7 @@ Any manually switched state stays until the next sun or schedule cycle update.
 
 ### Hardware
 
-Either ESP8266 or ESP32.
+Supports both ESP8266 and ESP32.
 Select the correct `common/board...` file, or create one based on the example of the others. You need uncomment or add your
 board to the main `outdoor-lamp.yaml`  in the `packages:` component
 
@@ -178,7 +178,7 @@ The wall switch input can be used to connect a regular switch, a daylight sensor
 Anyway, the motion sensor turns on the lamp, even in the dead of night when normally a lamp pause might exists.<br>
 If there is no valid clock, motion sensor simply always turns on, even during the day. 
 
-The daylight sensor however, only turns on the light a little earlier in the evening, or keeps it on little later in the morning.<br>
+The daylight sensor overrides the sun. When the network fails, it falls back to the sun times. 
 If there is no valid clock, it just works as a regular daylight sensor. 
 
 No sensor input means the input is just a wall switch, it works as a hotel or hallway switch. Any switch action on any connected switch will toggle the light 
@@ -208,15 +208,20 @@ The lamps do not need HA, but they do report into HA for easy monitoring, but al
 Or in the other direction, HA automation can drive the group. So you can have a motion or daylight sensor not hardware connected to this group, and make HA set the relevant switch on
 only one device so they will all respond. 
 
+If you drive Sensor or Motion switches from HA, you need to send a keepalive, advised is every 5 minutes. If 10 minutes pass without a keepalive, the sensor or motion inputs from HA expire.
+
+The Sensor switch needs a keep-alive for both on and off states, unless if you completely disable both local drivers (no sun and no schedule). At which point the device becomes just a remote group switch for HA. Motion will remain to work locally on the device though, unless if you turn that off too.
+
 ### Troubleshooting
 
 | Problem | Check |
 |---|---|
 | The lamp never follows the cycle | Lamp Schedule says "No valid clock": check WiFi, NTP and Home Assistant time |
 | Lamp Schedule says "Manual switch only" | Use sun and Use schedule are both off |
-| Switching at the wrong time of day | Timezone text, latitude and longitude |
-| Lamps do not follow each other | Same group name, network allows broadcasts, check router's client isolation |
-| New lamp does not get the group settings | Same group name, network allows broadcasts, check router's client isolation. After fixing the latter you can retry by re-entering the group name, or wait a few minutes. |
+| Lamp Schedule mentions dusk/dawn | One of the devices in the group is driven by a daylight sensor, so we cannot be sure about the exact times. |
+| Switching at the wrong time of day | Timezone, latitude or longitude wrong |
+| Lamps do not follow each other | They do not have same group name; Network must allow broadcasts and not have WiFi client isolation. |
+| New lamp does not get the group settings | They do not have same group name; Network must allow broadcasts and not have WiFi client isolation. |
 | Lamp is on when the cycle says off | A manual switch or sensor input may last until the cycle next changes state |
 | Wall switch does nothing | Connect daylight sensor or Connect motion sensor is on, so the input is read as one of those |
 | Device lost from the network | See reboot/recover section below |
