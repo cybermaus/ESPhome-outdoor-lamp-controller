@@ -21,14 +21,10 @@
 # When combined, these interact
 #   SUN+SCHEDULE : On at sundown, off at schedule, on at schedule, off at sunup
 #                  For example, on from 05h30-sunup and from sundown-23h00
-#   SUN+SENSOR   : On at sun times, except when it suddenly gets dark extra early
-#                  due to overcast. We call this "widen the dark" in comment lines  
-#   SENSOR+SCHED : On at sensor dark, but we go off for the dead of night
-#                  For example, on from dark-23h00 and from 05h30-light
-#                  // TODO sensor-schedule
-#                  This last combination is not yet supported on a grouped Device
-#                  due to some network protocol design challenges
-#   Similar intuitive use cases exist for the other permutations.
+#   SUN+SENSOR   : USE_SENSOR replaces the sun elevation as source of darkness
+#                  while the sensor is live, USE_SUN remains the fallback.
+#   SENSOR+SCHED : Same as SUN+SCHEDULE, except the sensor replaces the SUN
+#                  USE_SUN is required as fallback for network issues
 #   MOTION is not part of these combinations, when motion detected and dark, then
 #          switch on, even in the dead of night with a programmed off period.
 #
@@ -130,34 +126,30 @@
 # - Read the section about sync strategy below for more details
 #
 #
-# INPUTS: SENSOR and MOTION actions versus the USE_SENSOR and USE_MOTION switches
+# INPUTS: SENSOR and MOTION *actions* versus the USE_SENSOR and USE_MOTION *switches*
 #
 # SENSOR and MOTION are actions (state). They can be set by HA, by the wall switch
 # input, or by a received packet. They are distributed: the lamp that is activated
 # tells the group, so an HA automation only needs to drive one device.
+# Also to deal with network disconnects, they require a keep-alive from the
+# signal owner, even if that signal owner is HA
 #
 # USE_SENSOR and USE_MOTION are config: they say that the wall switch input is
-# wired to such a sensor and sets the action. That is hardware, so they are not
+# wired to such a sensor and sets the action. That is local hardware, so not
 # distributed. They are mutually exclusive: turning one on turns the other off.
+# Additionally, USE_SENSOR requires USE_SUN as network issue fallback
 # With both off, the input is a hotel/hallway switch, toggling on every edge.
 #
-# SENSOR  Forces "dark". With USE_SUN, or schedule only, it widens the dark.
-#         Without sun and schedule, SENSOR simply turns the lamp on.
-#         It never overrides the night pause or a manual switch.
-#         With only USE_SENSOR configured, the device is a classic light sensor
-#         broadcaster, the other lamps follow it.
-# MOTION  While on, and the sun is below the level (regardless of USE_SUN or
-#         USE_SCHEDULE), the lamp is on. It overrides the night pause.
-#         Without a valid clock it simply turns the lamp on.
-#         With only USE_MOTION configured, the device is a classic motion sensor
-#         broadcaster, the other lamps follow it.
-# When SENSOR or MOTION turns off, lamp_update runs and the lamp returns to
-# the state of the normal cycle.
+# SENSOR  Whoever drives sensor needs to keepalive it every 5 minutes. Upon receipt
+# it is assumed the local USE_SUN is merely a fallback and the sensor signal is used
+# as source of dark and source of light (both need keepalive).
+# Past 10 minutes since the last keepalive, the local sun calculations are used again.
 #
-# Lost input state: if the driving device fails, MOTION or SENSOR expires after
-# 10 min. Only a hardware wall input on the lamp itself never expires. Anything else
-# (a received packet, HA, the web UI) must repeat ON every 5 min as a keep-alive.
-# Two missed keep-alives turn the input off on the other lamps.
+# MOTION  While on and dark (or no clock) turn on the LAMP. It overrides any
+# the night pause. It also needs a keepalive but only for the on state.
+#
+# When SENSOR or MOTION turns off, by state or missed keepalive, the lamp returns to
+# the normal cycle.
 #
 #
 # INFO:
@@ -231,7 +223,7 @@ substitutions:
 # Substitutions like hardware pins from common/board-.....yaml added from packages
   devicename: outdoor-lamp
   description: Outdoor lamp controller.
-  prj_version: "2026.11.09"
+  prj_version: "2026.11.12"
 
   # Defaults compile locations, user can change them
 #  default_latitude:  "58.7" # Tiveden, SE
@@ -511,7 +503,7 @@ udp:
             
           } else if (param == "SENSOR") {
             bool on = (v == "1");
-            id(sensor_keepalive_ms) = on ? millis() : 0;
+            id(sensor_keepalive_ms) = millis();
             if (on != id(sensor_act).state) {
               if (on) id(sensor_act).turn_on(); else id(sensor_act).turn_off();
             }
@@ -729,12 +721,6 @@ switch:
     optimistic: true
     restore_mode: RESTORE_DEFAULT_ON
     on_turn_on:
-      - lambda: |-
-          // TODO sensor-schedule 
-          if ( ! id(device_group).state.empty() && id(use_sensor).state && id(use_schedule).state && ! id(use_sun).state) {
-            ESP_LOGI("combo", "Connect daylight sensor with Use schedule and without Use sun is not yet supported on a grouped device, switching it off");
-            id(use_sensor).turn_off();
-          }
       - script.execute: lamp_update
       - script.execute:
           id: group_send
@@ -762,12 +748,8 @@ switch:
           id: group_send
           param: "USE_SUN"
     on_turn_off:
-      - lambda: |-
-          // TODO sensor-schedule 
-          if ( ! id(device_group).state.empty() && id(use_sensor).state && id(use_schedule).state && ! id(use_sun).state) {
-            ESP_LOGI("combo", "Connect daylight sensor with Use schedule and without Use sun is not yet supported, switching it off");
-            id(use_sensor).turn_off();
-          }
+      # use_sun is required for use_sensor as fallback for dark on networked devices
+      - switch.turn_off: use_sensor
       - script.execute: lamp_update
       - script.execute:
           id: group_send
@@ -786,15 +768,25 @@ switch:
     restore_mode: ALWAYS_OFF
     disabled_by_default: true
     turn_on_action:
-      # SENSOR, when not driven locally by hardware, needs keepalive of a remote driver like HA
+      # When SENSOR not driven locally by hardware, needs keepalive of a remote driver like HA
       - lambda: 'id(sensor_keepalive_ms) = millis();'  # set keepalive timeout
       - script.execute:
           id: group_send
           param: "SENSOR"
     on_turn_on:
       - script.execute: lamp_update
+    turn_off_action:
+      # When SENSOR not driven locally by hardware, needs keepalive of a remote driver like HA
+      # The off state is guarded, reset if set, stay 0 if 0
+      - if:
+          condition:
+            lambda: 'return id(sensor_keepalive_ms) != 0;'
+          then:
+            - lambda: 'id(sensor_keepalive_ms) = millis();'
+            - script.execute:
+                id: group_send
+                param: "SENSOR"
     on_turn_off:
-      - lambda: 'id(sensor_keepalive_ms) = 0;'         # disable keepalive timeout
       - script.execute: lamp_update
       - script.execute:
           id: group_send
@@ -840,13 +832,10 @@ switch:
     internal: ${pushbutton} # cannot do this on pushbutton devices
     restore_mode: RESTORE_DEFAULT_OFF
     on_turn_on:
+      # cannot connect motion and daylight to the same input
       - switch.turn_off: use_motion
-      - lambda: |-
-          // TODO sensor-schedule 
-          if ( ! id(device_group).state.empty() && id(use_sensor).state && id(use_schedule).state && ! id(use_sun).state) {
-            ESP_LOGI("combo", "Connect daylight sensor with Use schedule and without Use sun is not yet supported, switching it off");
-            id(use_sun).turn_on();
-          }
+      # use_sun is required for use_sensor as fallback
+      - switch.turn_on: use_sun
       - if:
           condition:
             binary_sensor.is_on: wall_switch
@@ -1137,12 +1126,6 @@ text:
               id(device_group).publish_state(h);
             }
         - lambda: if (id(boot_done)) id(group_request).execute();
-        - lambda: |-
-            // TODO sensor-schedule 
-            if ( ! x.empty() && id(use_sensor).state && id(use_schedule).state && ! id(use_sun).state) {
-              ESP_LOGI("combo", "Connect daylight sensor with Use schedule and without Use sun is not yet supported on a grouped device, switching it off");
-              id(use_sensor).turn_off();
-            }
 
 
   # POSIX timezone string, see the header
@@ -1325,12 +1308,13 @@ script:
 
           if (sun) {
             // Decision by elevation: continuous, no date rollover jump.
-            // Wall_switch: when use_sensor this will widen light on period
-            bool dark  = id(sun_sun).elevation() < thr || sns;
+            // A daylight sensor (or keepalive) will replace the sun as source of darkness :
+            bool sensor_authoritative = id(use_sensor).state ||
+                (id(sensor_keepalive_ms) != 0 && millis() - id(sensor_keepalive_ms) <= 601000);
+            bool dark  = sensor_authoritative ? sns : (id(sun_sun).elevation() < thr);
             bool pause = in_window(m, off, on);   // off..on, sun + times
             bool in_night_pause = scd && pause;
             id(lamp_target) = (dark && !in_night_pause) ? 1 : 0;
-
 
             // Info text only, never feeds the decision:
             auto up = id(sun_sun).sunrise(thr);
@@ -1379,24 +1363,12 @@ script:
             if (scd) {
               // no Sun & Schedule: on from schedule_on to schedule_off, any length
               // Schedule only: the entire night, any length
-              // Wall_switch_sensor: when SENSOR this will widen light on period
+              // (USE_SENSOR implies USE_SUN, so not allowed here)
               bool in_schedule = in_window(m, on, off);
-              if (id(use_sensor).state) {
-                // Local sensor is the source of dark: dusk until schedule_off,
-                // pause until schedule_on, then on until dawn
-                bool pause = in_window(m, off, on);
-                id(lamp_target) = (sns && !pause) ? 1 : 0;
-                snprintf(buf, sizeof(buf), "dusk-%02d:%02d and %02d:%02d-dawn",
-                         id(schedule_off).hour, id(schedule_off).minute,
-                         id(schedule_on).hour, id(schedule_on).minute);
-              } else {
-                // No sensor, only follow schedule :
-                bool in_schedule = in_window(m, on, off);
-                id(lamp_target) = (in_schedule || sns) ? 1 : 0;
-                snprintf(buf, sizeof(buf), "%02d:%02d-%02d:%02d",
-                         id(schedule_on).hour, id(schedule_on).minute,
-                         id(schedule_off).hour, id(schedule_off).minute);
-              }
+              id(lamp_target) = (in_schedule || sns) ? 1 : 0;
+              snprintf(buf, sizeof(buf), "%02d:%02d-%02d:%02d",
+                       id(schedule_on).hour, id(schedule_on).minute,
+                       id(schedule_off).hour, id(schedule_off).minute);
               id(lamp_info).publish_state(buf);
             }
           }
@@ -1765,29 +1737,28 @@ interval:
       - script.execute: lamp_update
 
 
-  # Every 5 min: the lamp that originated MOTION/SENSOR repeats it, plus LAMP
+  # Every 5 min: the lamp that originated MOTION/SENSOR repeats it
+  # SENSOR is broadcasting both states, see "source of dark" in the design, but it does mean
+  # only one daylight sensor is allowed on the network, otherwise flipping might occur
+  # MOTION is only broadcasted if locally active, multiple motion sensors are allowed
   - interval: 5min
     then:
       - if:
+          #if MOTION originated here, then resend it every 5 minutes
           condition:
-            lambda: 'return (id(motion_act).state && id(motion_keepalive_ms) == 0) || (id(sensor_act).state && id(sensor_keepalive_ms) == 0);'
+            lambda: 'return id(motion_act).state && id(motion_keepalive_ms) == 0;'
           then:
-            - if:
-                #if MOTION originated here, then resend it every 5 minutes
-                condition:
-                  lambda: 'return id(motion_act).state && id(motion_keepalive_ms) == 0;'
-                then:
-                  - script.execute:
-                      id: group_send
-                      param: "MOTION"
-            - if:
-                #if SENSOR originated here, then resend it every 5 minutes
-                condition:
-                  lambda: 'return id(sensor_act).state && id(sensor_keepalive_ms) == 0;'
-                then:
-                  - script.execute:
-                      id: group_send
-                      param: "SENSOR"
+            - script.execute:
+                id: group_send
+                param: "MOTION"
+      - if:
+          #if SENSOR originated here, then resend it every 5 minutes
+          condition:
+            lambda: 'return id(use_sensor).state;'
+          then:
+            - script.execute:
+                id: group_send
+                param: "SENSOR"
 
 
   # Every hour: count hours without a time sync, and act on it.
