@@ -154,7 +154,7 @@
 #
 # INFO:
 # "Twilight info" text sensor shows the next calculated sun_up / sun_down.
-# "Lamp schdule" text sensor shows the calculated on-off schedule
+# "Lamp schedule" text sensor shows the calculated on-off schedule
 #
 # Everything defaults to the safe state at boot: relay off, until the cycle
 # has a valid clock and switches it on when needed.
@@ -207,7 +207,7 @@
 #   - If 10 s after our own request no awnser arrives and we never seen
 #     any peers, we are alone, so we declare ourselves synced, but suspect
 #     the request is also repeated every 5 minutes.
-#   - If any packet arrives (ignoring echo) we have peers
+#   - If any packet from a peer arrives we have peers
 #
 
 #######################################################################################
@@ -325,38 +325,60 @@ udp:
     then:
       - lambda: |-
 
-          // ignore other protocol magics :
+          // incomming packet data :
           std::string s(data.begin(), data.end());
+          uint32_t now = millis();
+
+          // fast duplicate suppression: direct packet to packet duplicate
+          static std::string prev_packet_s;
+          static uint32_t prev_packet_ms = 0;
+          if ( (now - prev_packet_ms) < 2000 && s == prev_packet_s ) {
+            //ESP_LOGD("udp", "in: %s", s.c_str());
+            //ESP_LOGD("udp", "dropped: duplicate packet");
+            return;
+          }
+          prev_packet_s = s;
+          prev_packet_ms = now;
+
+          // ignore other protocol magics :
           const std::string magic = "LAMPGROUP:";
-          std::string group = id(device_group).state;
           if (s.compare(0, magic.size(), magic) != 0) {
             //ESP_LOGD("udp", "in: %s", s.c_str());
-            //ESP_LOGD("udp", "no correct magic protocol marker");
+            //ESP_LOGD("udp", "dropped: incorrect magic marker");
+            return;
+          }
+
+          // UDP broadcast might echo back, so drop echo based on MAC :
+          if (s.find(get_mac_address_pretty()) != std::string::npos) {
+            ESP_LOGD("udp", "in: %s", s.c_str());
+            ESP_LOGD("udp", "dropped: our own echoed packet");
             return;
           }
 
           // LAMPGROUP:<group>:<param>[:<value>]; :
+          std::string group = id(device_group).state;
           size_t g_end = s.find(':', magic.size());
           if (group.empty() || g_end == std::string::npos ||
               s.substr(magic.size(), g_end - magic.size()) != group) {
             ESP_LOGD("udp", "in: %s", s.c_str());
-            ESP_LOGD("udp", "not responding, packet is for another group");
+            ESP_LOGD("udp", "dropped: packet is for another group");
             return;
           }
 
-          // duplicate suppression: if all 3 send attempts arrive, ignore the extras
-          static std::string last_s;
-          static uint32_t last_ms = 0;
-          uint32_t now = millis();
-          if ( (now - last_ms) < 2000 && s == last_s ) {
+          // slow duplicate suppression: if all 3 delayed send attempts arrive, ignore the extras
+          static std::string prev_msg_s;
+          static uint32_t prev_msg_ms = 0;
+          if ( (now - prev_msg_ms) < 2000 && s == prev_msg_s ) {
             //ESP_LOGD("udp", "in: %s", s.c_str());
-            //ESP_LOGD("udp", "duplicate packet dropped");
+            //ESP_LOGD("udp", "dropped: duplicate packet (slow)");
             return;
           }
-          last_s = s;
-          last_ms = now;
-          ESP_LOGD("udp", "in: %s", s.c_str());
+          prev_msg_s = s;
+          prev_msg_ms = now;
 
+          
+          // process incomming packet :
+          ESP_LOGD("udp", "in: %s", s.c_str());
 
           // Everything after the group is a series of items, each ended by ';':
           //   NAME;   or   NAME:value;   Only ended items count, a cut packet is ignored.
@@ -393,9 +415,6 @@ udp:
           }
 
           if (param == "REQCONFIG" || param == "RECONNECT") {
-            // For 2 seconds, ignore as likely our own request coming back as an echo :
-            if (millis() - id(last_outgoing_req_ms) >= 2000) {
-            
               id(group_has_peers) = true;
               if (id(group_is_synced)) {
                 if (param == "REQCONFIG") {
@@ -408,7 +427,6 @@ udp:
                   ESP_LOGD("udp", "not responding to RECONNECT due to short self uptime");
                 }
               }
-            }
             return;
           }
 
@@ -625,10 +643,6 @@ globals:
   - id: group_live
     type: bool
     initial_value: 'false'
-  # Time of our own last REQCONFIG, to ignore its echo
-  - id: last_outgoing_req_ms
-    type: uint32_t
-    initial_value: '0'
   # Packets waiting to be sent, one every 20 ms (see group_flush)
   # we stagger the send of UDP to avoid issues with accasional buffer problems on UDP send
   - id: udp_queue
@@ -1559,6 +1573,9 @@ script:
                     script.is_running: group_flush
                 then:
                   - script.execute: group_flush
+          else:
+            # silent suppression is a debugging trap: make it visible :
+            - lambda: 'ESP_LOGD("udp", "group_send suppressed: live=%d mute=%d", id(group_live), id(tx_mute));'
 
 
   # Ask the group for its config. Immediate on user change or with never valid config.
@@ -1573,7 +1590,6 @@ script:
             lambda: 'return id(group_is_synced) && ! id(sync_is_suspect) && ! id(device_group).state.empty();'
           then:
             - delay: !lambda 'return (uint32_t) (2000 + random_uint32() % 5000);'
-            - lambda: 'id(last_outgoing_req_ms) = millis();'
             - script.execute:
                 id: udp_tx
                 msg: !lambda 'return "LAMPGROUP:" + id(device_group).state + ":RECONNECT;";'
@@ -1591,7 +1607,6 @@ script:
           // Good (already synced) lamp: the RECONNECT answers should have re-synced us.
           // If not, first request after 5 to 6 minutes :
           return (uint32_t) (300000 + random_uint32() % 60000);
-      - lambda: 'id(last_outgoing_req_ms) = millis();'
       - if:
           condition:
             lambda: 'return !id(device_group).state.empty();'
@@ -1618,8 +1633,6 @@ script:
             lambda: 'return !id(device_group).state.empty();'
           then:
             - delay: 5min
-            # grab timestamp to ignore echo's
-            - lambda: id(last_outgoing_req_ms) = millis();
             - script.execute:
                 id: udp_tx
                 msg: !lambda |-
