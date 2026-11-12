@@ -1316,13 +1316,30 @@ script:
             bool in_night_pause = scd && pause;
             id(lamp_target) = (dark && !in_night_pause) ? 1 : 0;
 
-            // Info text only, never feeds the decision:
+
+            // Twilight info text only, never feeds the decision:
             auto up = id(sun_sun).sunrise(thr);
             auto dn = id(sun_sun).sunset(thr);
             if (up.has_value() && dn.has_value()) {
               snprintf(buf, sizeof(buf), "Next sun up %02d:%02d down %02d:%02d",
                        up->hour, up->minute, dn->hour, dn->minute);
               id(twilight_info).publish_state(buf);
+            } else {
+              id(twilight_info).publish_state("No sunrise/sunset today");
+            }
+         
+            // Schedule info text only, never feeds the decision:
+            if (sensor_authoritative) {
+              // The sensor is the source of dark AND of light
+              if (scd) {
+                snprintf(buf, sizeof(buf), "dusk-%02d:%02d and %02d:%02d-dawn",
+                         id(schedule_off).hour, id(schedule_off).minute,
+                         id(schedule_on).hour, id(schedule_on).minute);
+              } else {
+                snprintf(buf, sizeof(buf), "dusk-dawn");
+              }
+            } else if (up.has_value() && dn.has_value()) {
+
               if (scd) { // sun and schedule :
                 // Text subfunction, prints a window, or none when start is not before stop.
                 // Minutes may exceed 1440 for a next-day post midnight time.
