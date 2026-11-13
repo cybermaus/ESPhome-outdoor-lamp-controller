@@ -1335,11 +1335,11 @@ script:
             auto up = id(sun_sun).sunrise(thr);
             auto dn = id(sun_sun).sunset(thr);
             if (up.has_value() && dn.has_value()) {
-              snprintf(buf, sizeof(buf), "Next sun up %02d:%02d down %02d:%02d",
-                       up->hour, up->minute, dn->hour, dn->minute);
+              snprintf(buf, sizeof(buf), "Next sun down %02d:%02d up %02d:%02d",
+                       dn->hour, dn->minute, up->hour, up->minute);
               id(twilight_info).publish_state(buf);
             } else {
-              id(twilight_info).publish_state("No sunrise/sunset today");
+              id(twilight_info).publish_state("No sunset/sunrise today");
             }
          
             // Schedule info text only, never feeds the decision:
@@ -1372,14 +1372,13 @@ script:
                 char am[16], pm[16];
                 win_text(am, sizeof(am), on, up_m);        // morning: schedule_on until sunrise
                 win_text(pm, sizeof(pm), dn_m, off_m);     // evening: sunset until schedule_off
-                snprintf(buf, sizeof(buf), "%s and %s", am, pm);
+                snprintf(buf, sizeof(buf), "%s and %s", pm, am);
 
               } else {   // sun and no schedule :
                 snprintf(buf, sizeof(buf), "%02d:%02d-%02d:%02d",
                          dn->hour, dn->minute, up->hour, up->minute);
               }
             } else {
-              id(twilight_info).publish_state("No sunrise/sunset today");
               if (scd) { // all day sun or night but also a schedule :
                 snprintf(buf, sizeof(buf), "Follows sun, off %02d:%02d-%02d:%02d",
                          id(schedule_off).hour, id(schedule_off).minute,
