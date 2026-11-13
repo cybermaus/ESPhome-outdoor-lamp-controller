@@ -11,7 +11,7 @@ A small ESPHome controller for outdoor lamps: one relay, one wall input, and a d
 <img width="695" height="134" alt="image" src="https://github.com/user-attachments/assets/c761939d-1417-4cd1-a9ae-41f5cd895fe9" />
 
 It works **without central control**. There is no reliance on any central controller like Home Assistant, no MQTT broker,
-no ESP Now, no cloud account. It even works without stable network, for example when the lamp is placed far from the WiFi. It only needs to sync time once.
+no cloud account. It even works without stable network, for example when the lamp is placed far from the WiFi. It only needs to sync time once.
 Each lamp calculates its own cycle.
 
 ### Yet despite not relying on centralized control, multiple devices still work as one.
@@ -216,14 +216,14 @@ The Sensor switch needs a keep-alive for both on and off states, unless if you c
 
 | Problem | Check |
 |---|---|
-| The lamp never follows the cycle | Lamp Schedule says "No valid clock": check WiFi, NTP and Home Assistant time |
+| Lamp Schedule says "No valid clock" | Check access to NTP and/or Home Assistant time |
 | Lamp Schedule says "Manual switch only" | Use sun and Use schedule are both off |
-| Lamp Schedule mentions dusk/dawn | One of the devices in the group is driven by a daylight sensor, so we cannot be sure about the exact times. |
+| Lamp Schedule mentions dusk/dawn | The group is driven by a daylight sensor, so we cannot be sure about the exact times. |
 | Switching at the wrong time of day | Timezone, latitude or longitude wrong |
 | Lamps do not follow each other | They do not have same group name; Network must allow broadcasts and not have WiFi client isolation. |
 | New lamp does not get the group settings | They do not have same group name; Network must allow broadcasts and not have WiFi client isolation. |
 | Lamp is on when the cycle says off | A manual switch or sensor input may last until the cycle next changes state |
-| Wall switch does nothing | Connect daylight sensor or Connect motion sensor is on, so the input is read as one of those |
+| Wall switch does nothing | Connect daylight sensor or Connect motion sensor is on, so the input is interpreted as one of those |
 | Device lost from the network | See reboot/recover section below |
 
 ### Reboot and recovery
